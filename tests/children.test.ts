@@ -2,7 +2,7 @@ import type { TurnStepChunk, TurnStepResult } from 'claude-code'
 import { expect, mock, type TestBody, test } from 'claude-code/testing'
 import { relayEvents } from '../hooks/acp/events'
 import type { Norm } from '../hooks/acp/norm'
-import { CHILD_CALL, type Job, type Mark, pump } from '../hooks/acp/steps'
+import { answerCall, CHILD_CALL, type Job, type Mark, pump } from '../hooks/acp/steps'
 import { type Children, childRun, closeChildren, route, waitChild, woken } from '../hooks/children'
 import { NODE, run, STEP } from './helpers'
 
@@ -84,6 +84,82 @@ const engine = (w: Children) => ({
 
 const world = (): Children => ({ channels: new Map(), nested: new Map() })
 const of = (child: string, norm: Norm): Extract<Norm, { k: 'of' }> => ({ k: 'of', child, norm })
+
+test("a child's thinking and plan reach its view, but its context stays apart", () => {
+  const parse = relayEvents()
+  parse(JSON.stringify(CAPTURED[0]))
+  parse(JSON.stringify(CAPTURED[1]))
+  const updates = [
+    { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Checking the call sites.' } },
+    { sessionUpdate: 'plan', entries: [{ content: 'Read the code', status: 'in_progress', priority: 'medium' }] },
+    { sessionUpdate: 'usage_update', used: 40, size: 100 },
+  ]
+  expect(updates.flatMap((update) => parse(JSON.stringify({ sessionId: CHILD, update })))).toEqual([
+    of(CHILD, { k: 'thinking', t: 'Checking the call sites.' }),
+    of(CHILD, { k: 'plan', entries: [{ content: 'Read the code', status: 'in_progress' }] }),
+  ])
+})
+
+test("a child's progress and step rows stream before its final message", async () => {
+  const w = world()
+  route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', title: 'Read code' })
+  w.nested.set('n1', { key: 'a1/c#1' })
+  const send = (norm: Norm) => route(w, 'a1', 'via:codex', of('c', norm))
+  send({ k: 'thinking', t: 'Checking the call sites.' })
+  const plan: Norm = { k: 'plan', entries: [{ content: 'Read the code', status: 'in_progress' }] }
+  send(plan)
+  send(plan) // Repeated plan snapshots do not add rows.
+  send({ k: 'message' })
+  send({ k: 'text', t: 'Reading the implementation.' })
+  send({ k: 'call', id: 'read', kind: 'read', title: 'Read hooks/children.ts' })
+  send({ k: 'called', id: 'read', output: 'source', failed: false })
+  const job: Job = {
+    turnId: 't1',
+    gen: childRun(w, engine(w), 'n1', 'codex', { turnId: 't1', index: 0 }, new AbortController().signal, false),
+    held: [],
+    outputs: new Map(),
+    abort: new AbortController(),
+    count: 0,
+  }
+  const steps = { ...w, tool: 'mcp__plugin_via_step__step', jobs: new Map([['n1', job]]), calls: new Map(), spawns: new Map() }
+  const step = { turnId: 't1', index: 0, agentId: 'n1' }
+  const signal = new AbortController().signal
+  const first = await drain(pump(steps, job, step, signal))
+  expect(first.out[0]).toEqual({ kind: 'thinking', index: 0, text: 'Checking the call sites.' })
+  expect(first.result.toolUses[0]?.input).toEqual({ kind: 'plan', title: 'Plan' })
+  const planCall = first.out.find((c) => c.kind === 'tool')
+  expect(await answerCall(steps, planCall?.kind === 'tool' ? planCall.id : undefined, signal)).toEqual({ result: '◐ Read the code' })
+  const second = await drain(pump(steps, job, { ...step, index: 1 }, signal))
+  expect(second.out[0]).toEqual({ kind: 'text', index: 0, text: 'Reading the implementation.' })
+  expect(second.result.toolUses[0]?.input).toEqual({ kind: 'read', title: 'Read hooks/children.ts' })
+  const readCall = second.out.find((c) => c.kind === 'tool')
+  expect(await answerCall(steps, readCall?.kind === 'tool' ? readCall.id : undefined, signal)).toEqual({ result: 'source' })
+  // Still live throughout both steps. Only the next message and idle event finish the child.
+  expect(w.channels.get('a1/c#1')?.ended).toBe(false)
+  send({ k: 'message' })
+  send({ k: 'text', t: 'The implementation is correct.' })
+  route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', state: 'idle' })
+  const final = await drain(pump(steps, job, { ...step, index: 2 }, signal))
+  expect(final.result.answer).toBe('The implementation is correct.\n\n— answered by codex subagent')
+  expect(final.result.stopReason).toBe('end_turn')
+})
+
+test("a child's consecutive messages have separate text blocks and only the last is its answer", async () => {
+  const w = world()
+  route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', title: 'Read code' })
+  for (const t of ['Reading the code.', 'The code is correct.']) {
+    route(w, 'a1', 'via:codex', of('c', { k: 'message' }))
+    route(w, 'a1', 'via:codex', of('c', { k: 'text', t }))
+  }
+  route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', state: 'idle' })
+  w.nested.set('n1', { key: 'a1/c#1' })
+  const { out, result } = await drain(childRun(w, engine(w), 'n1', 'codex', { turnId: 't1', index: 0 }, new AbortController().signal, false))
+  expect(out.slice(0, 2)).toEqual([
+    { kind: 'text', index: 0, text: 'Reading the code.' },
+    { kind: 'text', index: 1, text: 'The code is correct.' },
+  ])
+  expect(result.answer).toBe('The code is correct.\n\n— answered by codex subagent')
+})
 
 async function drain(gen: AsyncGenerator<TurnStepChunk | Mark, TurnStepResult>) {
   const out: (TurnStepChunk | Mark)[] = []

@@ -300,9 +300,18 @@ const group = (kinds: unknown[], isActive = false): Parameters<typeof drawGroup>
 test('a folded run of harness calls is counted by what each did, in the order each kind first came', () => {
   expect(texts(drawGroup(group(['read', 'read', 'search']))).join('')).toBe('Read 2 files, searched 1 pattern')
   expect(texts(drawGroup(group(['execute', 'read', 'execute']))).join('')).toBe('Ran 2 commands, read 1 file')
-  expect(texts(drawGroup(group(['read'], true))).join('')).toBe('Reading 1 file…')
+  expect(texts(drawGroup(group(['read'], true))).join('')).toBe('Reading 1 file…x')
   // A kind ACP adds later, or none at all, still counts.
   expect(texts(drawGroup(group(['think', undefined]))).join('')).toBe('2 other steps')
+})
+
+test('a folded active group shows its latest step while completed groups keep their summary', () => {
+  const active = group(['read', 'execute'], true)
+  const calls = active.calls.map((call, index) =>
+    index === 1 ? { ...call, input: { kind: 'execute', title: 'pnpm test' }, isRunning: true } : call,
+  )
+  expect(texts(drawGroup({ ...active, calls })).join('')).toContain('Running pnpm test')
+  expect(texts(drawGroup({ ...active, calls, isActive: false })).join('')).not.toContain('pnpm test')
 })
 
 test('a run ended from outside while parked between pieces stops its harness', async () => {

@@ -226,7 +226,7 @@ function sessionEvents(cwdOf: () => string) {
 }
 
 // What a subagent's session says that its nested agent shows; its usage is its own context, not the run's.
-const SHOWN: ReadonlySet<string> = new Set(['message', 'text', 'call', 'called'])
+const SHOWN: ReadonlySet<string> = new Set(['message', 'text', 'thinking', 'plan', 'call', 'called'])
 
 // A parser per run. Updates before the first prompt are a resumed session's history, replayed by
 // session/load: never part of this answer.

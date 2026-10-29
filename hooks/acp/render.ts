@@ -40,6 +40,9 @@ const COUNTED: Record<string, [string, string, string, string]> = {
 // ran 2 commands") in place of its "Called plugin:via:step 5 times". Styled as Claude Code's own: dim,
 // counts bold, undimmed under the pointer, since a click unfolds it.
 export function drawGroup(props: RenderPropsOf['ToolGroup']): RenderElement {
+  // A quiet agent may emit only tool calls: keep its current work visible even when the engine folds
+  // those calls together. Finished groups retain the compact count and the usual expansion behavior.
+  const current = props.isActive ? (props.calls.findLast((call) => call.isRunning) ?? props.calls.at(-1)) : undefined
   const counts = new Map<string, number>()
   for (const call of props.calls) {
     const kind = (call.input as { kind?: unknown } | null)?.kind
@@ -58,6 +61,7 @@ export function drawGroup(props: RenderPropsOf['ToolGroup']): RenderElement {
     props: { key: 'via-group', paddingLeft: 2 },
     children: [
       { type: 'Text', props: { dimColor: true }, hover: { dimColor: false }, children: [...parts, ...(props.isActive ? ['…'] : [])] },
+      ...(current ? [drawCall({ ...current, tool_use_id: current.tool_use_id ?? '' })] : []),
     ],
   }
 }
