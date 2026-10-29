@@ -6,9 +6,11 @@ export type Choice = {
 }
 // A queued child's next event, through the engine so the hook's own-time budget is paused.
 export type ViaChildren = { wait: (input: { key: string }) => Promise<void> }
+export type ViaSteps = { wait: (input: { agentId: string }) => Promise<void> }
 declare module 'claude-code' {
   interface EngineInterface {
     viaChildren: ViaChildren
+    viaSteps: ViaSteps
   }
 
   interface PluginState {

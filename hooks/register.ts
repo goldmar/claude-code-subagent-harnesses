@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { drawCall, drawGroup } from './acp/render'
-import { answerCall, CHILD_CALL, endJob } from './acp/steps'
+import { answerCall, CHILD_CALL, endJob, waitStep } from './acp/steps'
 import type { Adapter } from './adapter'
 import { waitChild, woken } from './children'
 import { respond, textChunks } from './handback'
@@ -132,6 +132,7 @@ export const register: Register = (on, options) => {
     return {
       ...built,
       viaChildren: { wait: ({ key }: { key: string }) => waitChild(world, key, (wake) => built.clock.after(5_000, wake)) },
+      viaSteps: { wait: ({ agentId }: { agentId: string }) => waitStep(world, agentId, (wake) => built.clock.after(5_000, wake)) },
     }
   })
   on('session.start', async ($, e, next) => {
@@ -298,7 +299,13 @@ export const register: Register = (on, options) => {
 
   // The matcher's type names only built-in tools; an MCP tool's full name is accepted at run time.
   on('tool.call', { tool: STEP as 'Bash' }, ($, e, next) =>
-    answerCall(world, e.tool_use_id, next.signal, (wake) => $.clock.after(30_000, wake)),
+    answerCall(
+      world,
+      e.tool_use_id,
+      next.signal,
+      (wake) => $.clock.after(30_000, wake),
+      (agentId) => $.viaSteps.wait({ agentId }),
+    ),
   ).catch(() => ({
     deny: 'via could not report this harness tool call.',
   }))

@@ -49,6 +49,25 @@ async function take(job: Job): Promise<IteratorResult<TurnStepChunk | Mark, Turn
   return result
 }
 
+// A continuation can inherit a read started by an earlier hook. Join it through an
+// engine noun so this hook's own-time budget excludes the wait. Each noun reply stays
+// below the engine's ten-second deadline, even when the command takes many minutes.
+export async function waitStep(w: Steps, agentId: string, after: (wake: () => void) => Timer): Promise<void> {
+  const job = w.jobs.get(agentId)
+  if (!job || job.final !== undefined || job.abort.signal.aborted) return
+  let timer: Timer | undefined
+  try {
+    await Promise.race([
+      read(job),
+      new Promise<void>((resolve) => {
+        timer = after(resolve)
+      }),
+    ])
+  } finally {
+    timer?.cancel()
+  }
+}
+
 // The Agent calls a step makes for a harness's subagents: approved without the mode's classifier, which
 // judges only a model's own calls, and their nested agents run as via's.
 export const CHILD_CALL = 'toolu_via_child_'
@@ -153,6 +172,7 @@ export async function answerCall(
   toolUseId: string | undefined,
   signal: AbortSignal,
   after?: (wake: () => void) => Timer,
+  wait?: (agentId: string) => Promise<void>,
 ): Promise<{ result: string; isError?: true } | { deny: string }> {
   const ref = toolUseId === undefined ? undefined : w.calls.get(toolUseId)
   const job = ref === undefined ? undefined : w.jobs.get(ref.agentId)
@@ -178,7 +198,8 @@ export async function answerCall(
         void job.gen.return(undefined as never).catch(() => {})
         return { result: 'The harness run ended before this call finished.' }
       }
-      const r = await Promise.race([read(job), progress])
+      const r = await Promise.race([read(job), progress, ...(wait ? [wait(ref.agentId).then(() => 'wake' as const)] : [])])
+      if (r === 'wake') continue
       if (r === undefined) {
         // Only the display advances. The command and its pending read continue under the same id.
         job.held.push({
