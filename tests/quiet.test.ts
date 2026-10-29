@@ -13,12 +13,14 @@ declare module 'claude-code' {
 const REAL_CLOCK = {
   name: 'real-clock',
   register: ((on) => {
+    let starts = 0
     const update = (sessionId: string, update: unknown) => ({ sessionId, update })
     const text = (value: string) => ({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: value } })
     const line = (events: unknown[]) => `${events.map((event) => JSON.stringify(event)).join('\n')}\n`
     on('process.spawn', async function* ($, e) {
       const seconds = e.input?.includes('go300') ? 300 : 45
       const helper = seconds === 45
+      await $.fs.write('/test/runtime-starts', String(++starts))
       yield {
         stream: 'stdout',
         text: line([
@@ -161,11 +163,6 @@ for (const seconds of [45, 300])
         files.set(e.path, e.text)
         return { value: undefined }
       })
-      let starts = 0
-      on('process.spawn', async function* (_, e, next) {
-        starts += 1
-        return yield* next(e)
-      })
       on('process.run', () => ({ value: NODE }))
       on('agent.spawn', () => ({ agentId: 'n1', model: 'codex' }))
       const began = Date.now()
@@ -208,6 +205,6 @@ for (const seconds of [45, 300])
       expect(Date.now() - began).toBeGreaterThanOrEqual(seconds * 1_000)
       expect((await run($, { ...STEP, index: ++index })).result.answer).toContain('both finished')
       if (helper) expect((await run($, { ...STEP, agentId: 'n1', turnId: 'child' })).result.answer).toContain('NESTED_OK')
-      expect(starts).toBe(1)
+      expect(files.get('/test/runtime-starts')).toBe('1')
     },
   )
