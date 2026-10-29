@@ -581,6 +581,48 @@ test('the dialog drops bidirectional and zero-width characters that could disgui
   expect(asked[0]).toBe('codex wants to run `echo safe; rm -rf ~`. Allow it?')
 })
 
+test('three commands emit one row and result each despite pending placeholders and repeated ACP updates', async ($, on) => {
+  const spawns: Spawn[] = []
+  const commands = [1, 2, 3].flatMap((index) => {
+    const update = (status: string, title: string, sessionUpdate = 'tool_call_update') => ({
+      sessionId: SID,
+      update: {
+        sessionUpdate,
+        toolCallId: `command-${index}`,
+        status,
+        title,
+        kind: 'execute',
+        ...(status === 'completed' ? { rawOutput: String(index) } : {}),
+      },
+    })
+    return [
+      update('pending', 'exec_command', 'tool_call'),
+      update('in_progress', `echo ${index}`),
+      update('in_progress', `echo ${index}`),
+      update('completed', `echo ${index}`),
+      update('completed', `echo ${index}`),
+      update('in_progress', `echo ${index}`),
+    ]
+  })
+  arrange(on, spawns, {
+    stdout: lines([
+      ...CAPTURED.slice(0, 3),
+      ...commands,
+      chunk('answer', 'DONE'),
+      { relay: 'prompt_done', stopReason: 'end_turn' },
+      { relay: 'done', stopReason: 'end_turn' },
+    ]),
+  })
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
+  const { chunks, calls } = await runTurn($)
+  expect(chunks.filter((c) => c.kind === 'tool').map((c) => c.id)).toEqual(['toolu_step_t1_1', 'toolu_step_t1_2', 'toolu_step_t1_3'])
+  expect(chunks.flatMap((c) => (c.kind === 'input' ? [JSON.parse(c.json)] : []))).toEqual(
+    [1, 2, 3].map((index) => ({ kind: 'execute', title: `echo ${index}` })),
+  )
+  expect(calls).toEqual([{ result: '1' }, { result: '2' }, { result: '3' }])
+  expect(spawns).toHaveLength(1)
+})
+
 test('a /compact turn shows the compaction as a row and answers that it compacted, not that codex said nothing', async ($, on) => {
   const spawns: Spawn[] = []
   const compaction = (status: string) => ({ sessionId: SID, update: { sessionUpdate: 'compaction_update', compactionId: 'c1', status } })

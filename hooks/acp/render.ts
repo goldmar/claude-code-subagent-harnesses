@@ -25,47 +25,6 @@ function outputLine(line: string, first: boolean, diff: boolean): RenderElement 
     : { type: 'Text', props: { dimColor: true }, children: [`${lead}${line}`] }
 }
 
-// How a folded run counts each ACP tool kind: while live, then once done.
-const COUNTED: Record<string, [string, string, string, string]> = {
-  read: ['Reading', 'Read', 'file', 'files'],
-  search: ['Searching', 'Searched', 'pattern', 'patterns'],
-  execute: ['Running', 'Ran', 'command', 'commands'],
-  edit: ['Editing', 'Edited', 'file', 'files'],
-  delete: ['Deleting', 'Deleted', 'file', 'files'],
-  move: ['Moving', 'Moved', 'file', 'files'],
-  fetch: ['Fetching', 'Fetched', 'page', 'pages'],
-}
-
-// The line Claude Code folds a run of harness tool calls into, counted by what each did ("Read 3 files,
-// ran 2 commands") in place of its "Called plugin:via:step 5 times". Styled as Claude Code's own: dim,
-// counts bold, undimmed under the pointer, since a click unfolds it.
-export function drawGroup(props: RenderPropsOf['ToolGroup']): RenderElement {
-  // A quiet agent may emit only tool calls: keep its current work visible even when the engine folds
-  // those calls together. Finished groups retain the compact count and the usual expansion behavior.
-  const current = props.isActive ? (props.calls.findLast((call) => call.isRunning) ?? props.calls.at(-1)) : undefined
-  const counts = new Map<string, number>()
-  for (const call of props.calls) {
-    const kind = (call.input as { kind?: unknown } | null)?.kind
-    const counted = typeof kind === 'string' && Object.hasOwn(COUNTED, kind) ? kind : 'other'
-    counts.set(counted, (counts.get(counted) ?? 0) + 1)
-  }
-  const parts = [...counts].flatMap(([kind, n], i): RenderNode[] => {
-    const [live, done, one, many] = COUNTED[kind] ?? ['', '', 'other step', 'other steps']
-    const verb = props.isActive ? live : done
-    const lead = i === 0 ? verb : verb.toLowerCase()
-    const said: RenderNode[] = [{ type: 'Text', props: { bold: true }, children: [String(n)] }, ` ${n === 1 ? one : many}`]
-    return [...(i === 0 ? [] : [', ']), ...(lead ? [`${lead} `] : []), ...said]
-  })
-  return {
-    type: 'Box',
-    props: { key: 'via-group', paddingLeft: 2 },
-    children: [
-      { type: 'Text', props: { dimColor: true }, hover: { dimColor: false }, children: [...parts, ...(props.isActive ? ['…'] : [])] },
-      ...(current ? [drawCall({ ...current, tool_use_id: current.tool_use_id ?? '' })] : []),
-    ],
-  }
-}
-
 // The row of one harness tool call, as an ACP client draws it: its title, linked to the file it acts on
 // when the agent named one, then its output (a diff for an edit, the entries of a plan), a few lines
 // unless the view is expanded. Only a command gets a verb: other titles already say what they do

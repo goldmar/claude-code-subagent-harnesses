@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { drawCall, drawGroup } from './acp/render'
+import { drawCall } from './acp/render'
 import { answerCall, CHILD_CALL, endJob, waitStep } from './acp/steps'
 import type { Adapter } from './adapter'
 import { waitChild, woken } from './children'
@@ -311,10 +311,14 @@ export const register: Register = (on, options) => {
   }))
 
   on('ui.render', { component: 'ToolUse' }, (_, e, next) => (e.props.tool === world.tool ? drawCall(e.props) : next(e)))
-  // Claude Code decides which calls fold; via only counts them, and only a run of its own calls alone.
+  // Keep step rows in place: folding replaces them with a count as later calls arrive, which flickers.
+  // Delegate expanded groups to the engine so each call still uses its ToolUse renderer.
   on('ui.render', { component: 'ToolGroup' }, (_, e, next) =>
-    !e.props.isExpanded && e.props.isCallsOnly === true && e.props.calls.every((call) => call.tool === world.tool)
-      ? drawGroup(e.props)
+    !e.props.isExpanded &&
+    e.props.isCallsOnly === true &&
+    e.props.calls.length > 0 &&
+    e.props.calls.every((call) => call.tool === world.tool)
+      ? next({ ...e, props: { ...e.props, isExpanded: true } })
       : next(e),
   )
   // The row shows the output already, all of it when expanded.
