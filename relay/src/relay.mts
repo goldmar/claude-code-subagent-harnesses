@@ -116,7 +116,11 @@ const CAPABILITIES: acp.ClientCapabilities = {
   terminal: false,
   session: { compaction: {} },
   subagents: {},
-  _meta: { terminal_output_delta: true },
+  _meta: {
+    terminal_output_delta: true,
+    // Codex otherwise renders terminal provider errors as ordinary answer text.
+    ...(process.env.RELAY_STEER === 'steering' ? { jetbrains: { air: { version: 1, capabilities: ['sessionFailure'] } } } : {}),
+  },
 }
 const dash = process.argv.indexOf('--')
 const [bin, ...args] = dash < 0 ? [] : process.argv.slice(dash + 1)
@@ -259,6 +263,12 @@ const result = await acp
 
     const queue = [prompt]
     let interrupt: string | undefined
+    const takeInterrupt = () => {
+      if (interrupt === undefined) return
+      out({ relay: 'interrupted' })
+      queue.unshift(interrupt)
+      interrupt = undefined
+    }
     let last: acp.PromptResponse | undefined
     const promptDone = (r: acp.PromptResponse) =>
       // Not in the stable type, but codex-acp and opencode send it.
@@ -311,6 +321,7 @@ const result = await acp
     }
     let offset = 0
     const inbox = process.env.RELAY_INBOX
+    let paused = false
     if (inbox)
       setInterval(() => {
         if (!existsSync(inbox)) return
@@ -330,6 +341,12 @@ const result = await acp
             asked.delete(answer)
           } else if (typeof value === 'object' && value !== null && 'interrupt' in value) {
             const text = String((value as { interrupt: unknown }).interrupt)
+            if (paused && !busy) {
+              paused = false
+              queue.push(text)
+              out({ relay: 'interrupted' })
+              continue
+            }
             interrupt = interrupt === undefined ? text : `${interrupt}\n\n${text}`
             // An unanswered question would hold the turn open past the cancel.
             for (const [id, answerIt] of asked) {
@@ -342,25 +359,47 @@ const result = await acp
         offset = end + 1
       }, 300).unref()
 
-    while (queue.length > 0 || steering.size > 0) {
+    while (queue.length > 0 || steering.size > 0 || paused) {
       if (queue.length === 0) {
         await Promise.all(steering)
+        if (paused) await new Promise((resolve) => setTimeout(resolve, 100))
         continue
       }
+      paused = false
       const text = queue.shift() as string
       out({ relay: 'steered' })
       // Cleared here, not after: a resumed session's replayed history arrives before the first prompt.
       busy = true
       spokeIdle = false
-      const r = await ctx.request(acp.methods.agent.session.prompt, prompted(text)).catch((error: unknown) => fail(reason(error)))
+      const r = await ctx.request(acp.methods.agent.session.prompt, prompted(text)).catch((error: unknown) => {
+        // Legacy adapters can return the same error through JSON-RPC rather than typed metadata.
+        if (inbox && process.env.RELAY_STEER === 'steering' && /selected model is at capacity/i.test(reason(error))) {
+          paused = true
+          out({ relay: 'paused', message: reason(error) })
+          return undefined
+        }
+        return fail(reason(error))
+      })
       busy = false
+      if (!r) {
+        takeInterrupt()
+        continue
+      }
       last = r
       promptDone(r)
-      if (interrupt !== undefined) {
-        out({ relay: 'interrupted' })
-        queue.unshift(interrupt)
-        interrupt = undefined
+      const failure = (
+        r._meta as { jetbrains?: { air?: { sessionFailure?: { kind?: string; severity?: string; title?: string } } } } | undefined
+      )?.jetbrains?.air?.sessionFailure
+      if (failure?.severity === 'error') {
+        const message = failure.title ?? `Codex failed: ${failure.kind ?? 'provider error'}`
+        if (inbox && failure.kind === 'overloaded') {
+          // Keep the runtime and its native children. Only a new inbox message submits another prompt;
+          // the normal via deadline and explicit cancellation still stop this worker.
+          paused = true
+          out({ relay: 'paused', message })
+        } else fail(message)
       }
+      takeInterrupt()
     }
     return last
   })

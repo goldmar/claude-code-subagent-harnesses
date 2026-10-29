@@ -263,6 +263,13 @@ export function relayEvents(): (line: string) => Norm[] {
       }
       case 'error':
         return [{ k: 'error', message: typeof e.message === 'string' ? e.message : 'the relay failed' }]
+      case 'paused':
+        return [
+          {
+            k: 'tool',
+            t: `\n▸ ${typeof e.message === 'string' ? e.message : 'Codex is at capacity'}. Waiting for a follow-up; native helpers are retained.\n`,
+          },
+        ]
       case 'prompt_done': {
         // The prompt's own count of what it wrote, beside the context the last usage_update reported.
         const usage = isRecord(e.usage) ? e.usage : {}

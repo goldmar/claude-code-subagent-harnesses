@@ -182,6 +182,26 @@ test('a codex agent runs codex-acp behind the relay, with its prompt on stdin', 
   })
 })
 
+test('a capacity pause streams progress while only the resumed answer is signed', async ($, on) => {
+  const spawns: Spawn[] = []
+  arrange(on, spawns, {
+    stdout: lines([
+      { relay: 'session', sessionId: SID },
+      { relay: 'steered' },
+      { relay: 'paused', message: 'Model at capacity' },
+      { relay: 'steered' },
+      chunk('resumed', 'Recovered with the helper result'),
+      { relay: 'model', name: 'test-model' },
+    ]),
+  })
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
+  const { chunks, result } = await runTurn($)
+  expect(chunks.some((chunk) => chunk.kind === 'text' && chunk.text.includes('native helpers are retained'))).toBe(true)
+  expect(result.answer).toBe('Recovered with the helper result\n\n— answered by codex, test-model')
+  expect(result.answer).not.toContain('capacity')
+  expect(spawns).toHaveLength(1)
+})
+
 test('only the last message is the answer, signed with the model the session runs on, and usage is its context', async ($, on) => {
   const spawns: Spawn[] = []
   arrange(on, spawns)

@@ -10,6 +10,8 @@ const echo = process.env.FAKE_ECHO === '1'
 let offered
 let opened
 const config = []
+let prompts = 0
+let completedChild = false
 await acp
   .agent()
   .onRequest(acp.methods.agent.initialize, (ctx) => {
@@ -30,6 +32,35 @@ await acp
     return { configOptions: [] }
   })
   .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
+    if (process.env.FAKE_CAPACITY === '1') {
+      prompts += 1
+      if (prompts === 1) {
+        await ctx.client.notify(acp.methods.client.session.update, {
+          sessionId: 's1',
+          update: { sessionUpdate: 'subagent_update', sessionId: 'helper', title: 'helper', state: { state: 'running' } },
+        })
+        setTimeout(async () => {
+          completedChild = true
+          await ctx.client.notify(acp.methods.client.session.update, {
+            sessionId: 'helper',
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'saved helper result' } },
+          })
+        }, 100)
+        if (process.env.FAKE_CAPACITY_LEGACY === '1')
+          throw acp.RequestError.internalError({ details: 'Selected model is at capacity. Please try a different model.' })
+        return {
+          stopReason: 'end_turn',
+          _meta: {
+            jetbrains: { air: { version: 1, sessionFailure: { kind: 'overloaded', severity: 'error', title: 'Model at capacity' } } },
+          },
+        }
+      }
+      await ctx.client.notify(acp.methods.client.session.update, {
+        sessionId: 's1',
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify({ prompts, completedChild }) } },
+      })
+      return { stopReason: 'end_turn' }
+    }
     if (!echo) throw acp.RequestError.internalError({ details: "You've hit your usage limit. Try again at 10:04 PM." })
     const blocks = ctx.params.prompt.map((b) => (b.type === 'image' ? `image:${b.mimeType}:${b.data.length}` : b.type))
     const text = JSON.stringify({ offered, blocks, opened, config })

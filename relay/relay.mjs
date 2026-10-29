@@ -10147,7 +10147,11 @@ var CAPABILITIES = {
   terminal: false,
   session: { compaction: {} },
   subagents: {},
-  _meta: { terminal_output_delta: true }
+  _meta: {
+    terminal_output_delta: true,
+    // Codex otherwise renders terminal provider errors as ordinary answer text.
+    ...process.env.RELAY_STEER === "steering" ? { jetbrains: { air: { version: 1, capabilities: ["sessionFailure"] } } } : {}
+  }
 };
 var dash = process.argv.indexOf("--");
 var [bin, ...args] = dash < 0 ? [] : process.argv.slice(dash + 1);
@@ -10260,6 +10264,12 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
     out({ relay: "model", name: current.currentValue });
   const queue = [prompt];
   let interrupt;
+  const takeInterrupt = () => {
+    if (interrupt === void 0) return;
+    out({ relay: "interrupted" });
+    queue.unshift(interrupt);
+    interrupt = void 0;
+  };
   let last;
   const promptDone = (r) => (
     // Not in the stable type, but codex-acp and opencode send it.
@@ -10303,6 +10313,7 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
   };
   let offset = 0;
   const inbox = process.env.RELAY_INBOX;
+  let paused = false;
   if (inbox)
     setInterval(() => {
       if (!existsSync(inbox)) return;
@@ -10321,6 +10332,12 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
           asked.delete(answer);
         } else if (typeof value === "object" && value !== null && "interrupt" in value) {
           const text2 = String(value.interrupt);
+          if (paused && !busy) {
+            paused = false;
+            queue.push(text2);
+            out({ relay: "interrupted" });
+            continue;
+          }
           interrupt = interrupt === void 0 ? text2 : `${interrupt}
 
 ${text2}`;
@@ -10333,24 +10350,41 @@ ${text2}`;
       }
       offset = end + 1;
     }, 300).unref();
-  while (queue.length > 0 || steering.size > 0) {
+  while (queue.length > 0 || steering.size > 0 || paused) {
     if (queue.length === 0) {
       await Promise.all(steering);
+      if (paused) await new Promise((resolve) => setTimeout(resolve, 100));
       continue;
     }
+    paused = false;
     const text = queue.shift();
     out({ relay: "steered" });
     busy = true;
     spokeIdle = false;
-    const r = await ctx.request(methods.agent.session.prompt, prompted(text)).catch((error2) => fail(reason(error2)));
+    const r = await ctx.request(methods.agent.session.prompt, prompted(text)).catch((error2) => {
+      if (inbox && process.env.RELAY_STEER === "steering" && /selected model is at capacity/i.test(reason(error2))) {
+        paused = true;
+        out({ relay: "paused", message: reason(error2) });
+        return void 0;
+      }
+      return fail(reason(error2));
+    });
     busy = false;
+    if (!r) {
+      takeInterrupt();
+      continue;
+    }
     last = r;
     promptDone(r);
-    if (interrupt !== void 0) {
-      out({ relay: "interrupted" });
-      queue.unshift(interrupt);
-      interrupt = void 0;
+    const failure2 = r._meta?.jetbrains?.air?.sessionFailure;
+    if (failure2?.severity === "error") {
+      const message = failure2.title ?? `Codex failed: ${failure2.kind ?? "provider error"}`;
+      if (inbox && failure2.kind === "overloaded") {
+        paused = true;
+        out({ relay: "paused", message });
+      } else fail(message);
     }
+    takeInterrupt();
   }
   return last;
 });
