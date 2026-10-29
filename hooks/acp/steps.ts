@@ -32,7 +32,7 @@ export type Steps = {
   tool: string
   spawns: Map<string, string> // by an Agent tool_use id a step made: the harness subagent it shows
   jobs: Map<string, Job> // by agent id
-  calls: Map<string, { agentId: string; id: string }> // by tool_use_id: the harness's own call id
+  calls: Map<string, { agentId: string; id: string; input?: Extract<Mark, { kind: 'call-start' }>['input'] }> // by tool_use_id
 }
 
 // The Agent calls a step makes for a harness's subagents: approved without the mode's classifier, which
@@ -110,7 +110,7 @@ export async function* pump(
       if (c.kind === 'call-start') {
         job.count += 1
         const id = `toolu_step_${e.turnId.replace(/[^A-Za-z0-9_]/g, '_')}_${job.count}`
-        w.calls.set(id, { agentId: e.agentId ?? '', id: c.id })
+        w.calls.set(id, { agentId: e.agentId ?? '', id: c.id, input: c.input })
         const index = block(-1 - job.count)
         yield { kind: 'tool', index, id, name: w.tool }
         yield { kind: 'input', index, json: JSON.stringify(c.input) }
@@ -164,7 +164,20 @@ export async function answerCall(
         continue
       }
       if (r.value.kind === 'call-end') job.outputs.set(r.value.id, { output: r.value.output, failed: r.value.failed })
-      else job.held.push(r.value)
+      else if (r.value.kind === 'spawn') {
+        // Let the next step show the child now, while the harness's tool is still running. A native
+        // Agent call preserves the child's hooks; spawning from this hook would skip it in the child.
+        // The continuation only reads this same run and call id: it never executes the tool again.
+        const input = ref.input ?? { kind: 'other', title: 'harness tool' }
+        job.held.unshift(r.value, {
+          kind: 'call-start',
+          id: ref.id,
+          input: input.kind === 'wait' ? input : { kind: 'wait', title: `Waiting for ${input.title}` },
+          usage: null,
+        })
+        w.calls.delete(toolUseId as string)
+        return { result: 'The harness tool is still running; showing its subagent now.' }
+      } else job.held.push(r.value)
     }
   } finally {
     unlend()

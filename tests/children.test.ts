@@ -153,7 +153,9 @@ test("a child's consecutive messages have separate text blocks and only the last
   }
   route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', state: 'idle' })
   w.nested.set('n1', { key: 'a1/c#1' })
-  const { out, result } = await drain(childRun(w, engine(w), 'n1', 'codex', { turnId: 't1', index: 0 }, new AbortController().signal, false))
+  const { out, result } = await drain(
+    childRun(w, engine(w), 'n1', 'codex', { turnId: 't1', index: 0 }, new AbortController().signal, false),
+  )
   expect(out.slice(0, 2)).toEqual([
     { kind: 'text', index: 0, text: 'Reading the code.' },
     { kind: 'text', index: 1, text: 'The code is correct.' },
@@ -403,4 +405,131 @@ test('cancelling a quiet child removes its waiter and returns an unsigned failur
   expect(w.channels.get('a1/c#1')?.wake).toBeUndefined()
   closeChildren(w, 'a1')
   expect(w.channels.size).toBe(0)
+})
+
+test('a child answers during a parent tool, whose continuation still delivers its eventual output', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HOME: '/home/u' })
+  on('agent.list', () => ({ value: [{ id: 'a1', description: 'parent', type: 'via:codex', status: 'running' }] }))
+  on('session.messages', () => ({ value: [] }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } }))
+  on('fs.write', () => ({ value: undefined }))
+  on('process.run', () => ({ value: NODE }))
+  on('agent.spawn', (_, e) => ({ agentId: 'n1', model: e.model ?? 'codex' }))
+  let requests = 0
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const line = (events: unknown[]) => `${events.map((event) => JSON.stringify(event)).join('\n')}\n`
+  on('process.spawn', async function* () {
+    requests += 1
+    yield { stream: 'stdout', text: line([CAPTURED[0], CAPTURED[1], CAPTURED[6]]) }
+    yield {
+      stream: 'stdout',
+      text: line([
+        {
+          sessionId: ROOT,
+          update: { toolCallId: 'parallel', title: 'parallel', kind: 'execute', status: 'in_progress', sessionUpdate: 'tool_call' },
+        },
+        ...CAPTURED.slice(2, 5),
+        CAPTURED[10],
+        CAPTURED[11],
+      ]),
+    }
+    await held
+    yield {
+      stream: 'stdout',
+      text: line([
+        {
+          sessionId: ROOT,
+          update: {
+            toolCallId: 'parallel',
+            status: 'completed',
+            sessionUpdate: 'tool_call_update',
+            _meta: { terminal_output_delta: { data: 'parallel output' } },
+          },
+        },
+        {
+          sessionId: ROOT,
+          update: {
+            toolCallId: 'w',
+            status: 'completed',
+            sessionUpdate: 'tool_call_update',
+            _meta: { terminal_output_delta: { data: 'parent output' } },
+          },
+        },
+        CAPTURED[13],
+      ]),
+    }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.turn.start({ turnId: 'parent', text: 'go', agentId: 'a1' })
+  const step = { ...STEP, turnId: 'parent' }
+  const first = await run($, step)
+  const call = first.chunks.find((chunk) => chunk.kind === 'tool')
+  let released = false
+  const pending = $.tool
+    .call({ tool: call?.kind === 'tool' ? call.name : '', tool_use_id: call?.kind === 'tool' ? call.id : '' } as never)
+    .then((result) => {
+      released = true
+      return result
+    })
+  await clock.settle()
+  const before = released
+  let answer = ''
+  let continued: unknown
+  let continuation: Promise<unknown> | undefined
+  try {
+    if (before) {
+      const spawn = await run($, { ...step, index: 1 })
+      const tool = spawn.chunks.find((chunk) => chunk.kind === 'tool')
+      expect(tool?.kind === 'tool' && tool.name).toBe('Agent')
+      await $.agent.spawn({
+        tool_use_id: tool?.kind === 'tool' ? tool.id : '',
+        subagentType: 'via:codex',
+        prompt: 'List acp',
+        description: 'List acp',
+        provider: { plugin: 'engine', tier: 'core' },
+        parentModel: 'codex',
+        parentAgentId: 'a1',
+        background: true,
+        fork: false,
+      })
+      const child = run($, { ...STEP, turnId: 'nested', agentId: 'n1' })
+      const wait = await run($, { ...step, index: 2 })
+      expect(wait.result.toolUses[0]?.input).toEqual({ kind: 'wait', title: 'Waiting for wait' })
+      const next = wait.chunks.find((chunk) => chunk.kind === 'tool')
+      continuation = $.tool
+        .call({ tool: next?.kind === 'tool' ? next.name : '', tool_use_id: next?.kind === 'tool' ? next.id : '' } as never)
+        .then((result) => {
+          continued = result
+          return result
+        })
+      await clock.settle()
+      answer = (await child).result.answer
+      expect(continued).toBeUndefined()
+    }
+  } finally {
+    release()
+    await pending
+    if (continuation) await continuation
+  }
+  expect(before).toBe(true)
+  expect(answer).toBe('steps.ts\n\n— answered by codex subagent, gpt-6-luna')
+  expect(continued).toEqual({ result: 'parent output' })
+  // An earlier parallel call was held before the spawn: it did not delay the child or lose output.
+  const parallel = await run($, { ...step, index: 3 })
+  const parallelTool = parallel.chunks.find((chunk) => chunk.kind === 'tool')
+  expect(
+    await $.tool.call({
+      tool: parallelTool?.kind === 'tool' ? parallelTool.name : '',
+      tool_use_id: parallelTool?.kind === 'tool' ? parallelTool.id : '',
+    } as never),
+  ).toEqual({ result: 'parallel output' })
+  const last = await run($, { ...step, index: 4 })
+  expect(last.result.toolUses).toEqual([])
+  expect(last.result.answer).toContain('It found steps.ts.')
+  expect(requests).toBe(1)
 })
