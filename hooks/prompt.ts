@@ -112,6 +112,10 @@ export function helpOf(adapter: HelpAdapter, models: readonly string[]): string 
       : 'Messages to an agent are follow-ups: this harness takes no mid-run steering.',
   )
   if (adapter.steer) lines.push('A message starting interrupt: stops the current step and runs at once.')
+  if (name === 'codex')
+    lines.push(
+      'Codex may report "aborted before dispatch" while admitting a native helper mailbox message. Inspect that message and current state before deciding whether the operation still needs to run; via does not retry it automatically.',
+    )
   lines.push(`A genuine answer ends with — answered by ${name}, <model>. Example:`)
   if (models[0]) lines.push(`model: ${models[0]}`)
   if (adapter.thinking.includes('high')) lines.push('thinking: high')
