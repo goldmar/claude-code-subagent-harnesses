@@ -1,6 +1,6 @@
 import { expect, mock, type TestBody, test } from 'claude-code/testing'
 
-import { run, STEP } from '../helpers'
+import { run, STEP, storage } from '../helpers'
 
 type TestOn = Parameters<TestBody>[1]
 type Spawn = { argv: string[]; input: string | undefined }
@@ -59,6 +59,7 @@ function arrange(
   probes: string[][] = [],
   probe: { exitCode: number; stdout: string } | 'reject' = { exitCode: 0, stdout: MODEL },
 ) {
+  storage(on)
   mock.env(on, {})
   on('agent.list', () => ({ value: [AGENT] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
@@ -292,6 +293,7 @@ test('the model probe runs alongside the run, not before it', async ($, on) => {
   const started = new Promise<void>((resolve) => {
     spawned = resolve
   })
+  storage(on)
   mock.env(on, {})
   on('agent.list', () => ({ value: [AGENT] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))

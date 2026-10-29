@@ -161,6 +161,7 @@ export async function* childRun(
   e: { turnId: string; index: number },
   signal: AbortSignal,
   handback: boolean,
+  complete?: (signed: string) => Promise<void>,
 ): AsyncGenerator<TurnStepChunk | Mark, TurnStepResult> {
   const nested = w.nested.get(agentId)
   const channel = nested === undefined ? undefined : w.channels.get(nested.key)
@@ -251,6 +252,7 @@ export async function* childRun(
   const said = report.trim() || (failure ? '' : `The ${name} subagent ended without a message.`)
   const signed = [said, tail].filter(Boolean).join('\n\n')
   if (nested) nested.report = signed
+  await complete?.(signed).catch(() => undefined)
   if (channel) channel.read = true
   if (channel?.closed) for (const [key, held] of w.channels) if (held === channel) w.channels.delete(key)
   yield push('text', `${report.trim() ? '\n\n' : ''}${said && !report.trim() ? `${said}\n\n` : ''}${tail}`)

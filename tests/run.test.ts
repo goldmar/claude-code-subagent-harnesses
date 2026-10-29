@@ -4,7 +4,23 @@ import { answerCall, CHILD_CALL, pump } from '../hooks/acp/steps'
 import { pi } from '../hooks/adapters/pi'
 import { turnStep } from '../hooks/turn'
 import type { World } from '../hooks/world'
-import { arrange, bottom, ENV, expectPiSpawn, hang, lines, NODE, node, ROOT, run, type Spawn, STEP, split } from './helpers'
+import {
+  arrange,
+  bottom,
+  ENV,
+  expectPiSpawn,
+  hang,
+  lines,
+  NODE,
+  node,
+  ROOT,
+  requestOf,
+  run,
+  type Spawn,
+  STEP,
+  split,
+  storage,
+} from './helpers'
 
 test('a pi run past the default 30 minutes is stopped with its partial answer, unsigned', async ($, on) => {
   const clock = mock.clock(on)
@@ -148,15 +164,19 @@ test('a pi agent whose first turn carries no text runs the spawn prompt', async 
 
 test('a spawn teaches the harness before agent.list catches up', async ($, on) => {
   const spawns: Spawn[] = []
+  const files = storage(on)
   mock.env(on, { TMPDIR: '/tmp', HOME: '/home/u' })
   on('agent.list', () => ({ value: [] }))
   node(on)
-  on('fs.write', () => ({ value: undefined }))
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e, next) => next(e))
   on('session.messages', () => ({ value: [] }))
   on('process.spawn', async function* (_, e) {
-    spawns.push({ argv: [...e.argv], input: e.input, env: e.env })
+    spawns.push(requestOf(e))
     yield* split(lines)
     return { value: { code: 0, signal: null } }
   })
@@ -616,6 +636,7 @@ test('a model line never signs for pi: a stream that names no model says so', as
 })
 
 test('an agent that is not a via agent is looked up once, not on every step', async ($, on) => {
+  storage(on)
   let lists = 0
   on('agent.list', () => {
     lists += 1

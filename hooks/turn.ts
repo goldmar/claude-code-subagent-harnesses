@@ -6,47 +6,33 @@ import { childRun } from './children'
 import { deliver, handbackAsked, respond, textChunks } from './handback'
 import { cachedModels } from './models'
 import { helpOf, isModel, promptOf } from './prompt'
+import { answerOf, answerPath, attachChild, keepSpawn, type Receipt, remember, roster } from './recovery'
 import { cutOff, type RunResult, run } from './run'
 import { openInbox } from './steer'
+
+export { remember } from './recovery'
+
 import type { World } from './world'
 
 type StepHook = StreamHook<'turn.step'>
 
-// Each via agent's harness and handback, kept across processes in $.store: a session sent to the
-// background continues in a new process, with none of the spawn's state. The newest ROSTER_KEPT.
-const ROSTER = 'agents'
-const ROSTER_KEPT = 200
-type Kept = { harness: string; handback: boolean }
-async function roster($: Pick<EngineInterface, 'store'>): Promise<Record<string, Kept>> {
-  const stored = await $.store.get(ROSTER).catch(() => undefined)
-  if (typeof stored !== 'object' || stored === null) return {}
-  return Object.fromEntries(
-    Object.entries(stored as Record<string, unknown>).filter(
-      (entry): entry is [string, Kept] => typeof (entry[1] as Kept | null)?.harness === 'string',
-    ),
-  )
-}
-export function remember(w: World, $: Pick<EngineInterface, 'store'>, agentId: string, kept: Kept): Promise<void> {
-  const write = async () => {
-    const others = Object.entries(await roster($))
-      .filter(([id]) => id !== agentId)
-      .slice(-(ROSTER_KEPT - 1))
-    await $.store.set(ROSTER, Object.fromEntries([...others, [agentId, kept]])).catch(() => undefined)
-  }
-  w.roster = (w.roster ?? Promise.resolve()).then(write)
-  return w.roster
-}
-
 export async function adapterOf(w: World, $: Parameters<StepHook>[0], agentId: string): Promise<Adapter | undefined> {
   if (w.others.has(agentId)) return undefined
   const known = w.agents.get(agentId)
-  if (known) return known
+  if (known) {
+    if (!w.nested.has(agentId)) {
+      const kept = (await roster($))[agentId]
+      if (kept?.nested) w.nested.set(agentId, { key: kept.nested.key })
+    }
+    return known
+  }
   // Ahead of agent.list: the new process of a session sent to the background resumes the agent as
   // general-purpose. Its step would go to Claude under the harness's model name.
   const kept = (await roster($))[agentId]
   const remembered = kept ? w.adapters.get(kept.harness) : undefined
   if (remembered) {
     w.agents.set(agentId, remembered)
+    if (kept?.nested) w.nested.set(agentId, { key: kept.nested.key })
     return remembered
   }
   const agent = (await $.agent.list()).find((a) => a.id === agentId)
@@ -196,13 +182,33 @@ async function* nestedStep(
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
   const job = w.jobs.get(agentId)
   if (job !== undefined) return yield* pump(w, job, e, signal)
+  if (nested.report !== undefined) return yield* retained(w, $, adapter, e, agentId, nested.report)
+  const kept = (await roster($))[agentId]
+  const receipt = kept?.nested?.run ?? (kept?.nested ? (await roster($))[kept.nested.parent]?.run : undefined)
+  if (receipt) {
+    const saved = await answerOf($, answerPath(receipt, nested.key))
+    if (saved && !saved.aborted && saved.signed.trim()) nested.report = saved.signed
+    else if (kept?.nested) await attachChild(w, $, adapter, nested.key, kept.nested.parent, receipt)
+  }
   // After its handback, or a later message: the answer again, as text.
-  if (nested.report !== undefined) return yield* respond(e, textChunks(nested.report), nested.report)
+  if (nested.report !== undefined) return yield* retained(w, $, adapter, e, agentId, nested.report)
   const abort = new AbortController()
   const handback = await handbackOf(w, $, agentId)
   const started: Job = {
     turnId: e.turnId,
-    gen: childRun(w, $, agentId, adapter.name, e, abort.signal, handback),
+    gen: nestedRun(
+      w,
+      $,
+      agentId,
+      adapter.name,
+      e,
+      abort.signal,
+      handback,
+      receipt
+        ? (signed) =>
+            $.fs.write(answerPath(receipt, nested.key), JSON.stringify({ signed, aborted: abort.signal.aborted, usage: null, block: 0 }))
+        : undefined,
+    ),
     held: [],
     outputs: new Map(),
     abort,
@@ -210,6 +216,22 @@ async function* nestedStep(
   }
   w.jobs.set(agentId, started)
   return yield* pump(w, started, e, signal)
+}
+
+async function* nestedRun(
+  w: World,
+  $: Parameters<StepHook>[0],
+  agentId: string,
+  name: string,
+  e: { turnId: string; index: number },
+  signal: AbortSignal,
+  handback: boolean,
+  complete?: (signed: string) => Promise<void>,
+): AsyncGenerator<TurnStepChunk | Mark, TurnStepResult> {
+  const result = yield* childRun(w, $, agentId, name, e, signal, handback, complete)
+  if (result.toolUses.some((tool) => tool.name === 'SubagentHandback'))
+    await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, true)
+  return result
 }
 
 // A run outlives the step that started it: each harness tool call ends a step with a call to via's
@@ -220,15 +242,13 @@ export async function* turnStep(w: World, $: Parameters<StepHook>[0], e: Paramet
   if (agentId === undefined) return yield* next(e)
   const adapter = await adapterOf(w, $, agentId)
   if (adapter === undefined) return yield* next(e)
+  w.keepSpawn = (id, key) => keepSpawn(w, $, id, key)
   const nested = w.nested.get(agentId)
   if (nested !== undefined) return yield* nestedStep(w, $, e, agentId, adapter, nested, next.signal)
-  if (w.turns.get(e.turnId)?.wake) {
-    const saved = (await $.state.get({ plugin: 'via', key: 'reports', id: agentId })).value ?? ''
-    return yield* respond(e, textChunks(saved), saved)
-  }
   const job = w.jobs.get(agentId)
   if (job !== undefined) {
-    if (job.turnId === e.turnId) return yield* pump(w, job, e, next.signal)
+    const turn = w.turns.get(e.turnId)
+    if (job.turnId === e.turnId || turn === undefined || turn.wake) return yield* pump(w, job, e, next.signal)
     endJob(w, agentId)
   }
   const started = yield* begin(w, adapter, $, e, agentId)
@@ -247,7 +267,23 @@ async function* begin(
   agentId: string,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult | Job | undefined> {
   const turn = w.turns.get(e.turnId)
-  if (turn === undefined) {
+  const receipt = (await roster($))[agentId]?.run
+  if (receipt && (turn === undefined || turn.wake || receipt.turnId === e.turnId)) {
+    const saved = await answerOf($, answerPath(receipt))
+    if (saved && !saved.aborted && saved.signed.trim()) return yield* retained(w, $, adapter, e, agentId, saved.signed)
+    if (!saved?.aborted) {
+      const abort = new AbortController()
+      return {
+        turnId: e.turnId,
+        gen: recovered(w, $, adapter, e, agentId, receipt, abort.signal),
+        held: [],
+        outputs: new Map(),
+        abort,
+        count: 0,
+      }
+    }
+  }
+  if (turn === undefined || turn.wake) {
     // A compaction can take a step with no turn.start: keep the agent's real answer, not the stub.
     // Claude Code takes the last text as the result even after a handback, so a delivered report is
     // repeated as text, and only an undelivered one is handed back.
@@ -365,6 +401,66 @@ async function* begin(
   return job
 }
 
+// Reports and journals are reconciled before the missing-turn fallback. Following replays data only;
+// the worker that owns the command admits it exactly once, even after the Claude process has exited.
+async function* retained(
+  w: World,
+  $: Parameters<StepHook>[0],
+  adapter: Adapter,
+  e: { turnId: string; index: number },
+  agentId: string,
+  signed: string,
+) {
+  const handed = (await $.state.get({ plugin: 'via', key: 'handedBack', id: agentId })).value === true
+  if (!handed && (await handbackOf(w, $, agentId))) {
+    await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, true)
+    return yield* deliver(adapter.name, e, { prompt: '', report: signed, delivered: false }, 0, signed, null)
+  }
+  return yield* respond(e, textChunks(signed), signed)
+}
+async function* recovered(
+  w: World,
+  $: EngineInterface,
+  adapter: Adapter,
+  e: { turnId: string; index: number },
+  agentId: string,
+  receipt: Receipt,
+  signal: AbortSignal,
+): AsyncGenerator<TurnStepChunk | Mark, TurnStepResult> {
+  const inbox = receipt.inbox
+    ? { name: adapter.name, path: receipt.inbox, lines: (await $.fs.read(receipt.inbox).catch(() => '')).split('\n').filter(Boolean) }
+    : undefined
+  if (inbox) w.inboxes.set(agentId, inbox)
+  const result = yield* run(w, adapter, $, {
+    agentId,
+    choice: receipt.choice,
+    prompt: receipt.compact ? '/compact' : '',
+    signal,
+    inbox,
+    session: receipt.session,
+    guard: undefined,
+    mode: receipt.mode,
+    durable: { path: receipt.path, scope: receipt.scope, recover: true },
+    shownChildren: new Set([
+      ...Object.values(await roster($)).flatMap((kept) => (kept.nested ? [kept.nested.key] : [])),
+      ...Object.values(receipt.spawns ?? {}),
+    ]),
+    complete: (result) => $.fs.write(answerPath(receipt), JSON.stringify(result)),
+    probe: async () => undefined,
+    save: async (id) => {
+      await $.state.set({ plugin: 'via', key: 'sessions', id: agentId }, id)
+    },
+  })
+  if (result.aborted) return yield* respond(e, [{ kind: 'stop', stopReason: 'end_turn', usage: null }], '')
+  const signed =
+    result.next === undefined
+      ? result.signed
+      : `The retained ${adapter.name} run stopped before its pending interrupt could run.\n\nPending message:\n${result.next}`
+  if (result.next !== undefined) await $.fs.write(answerPath(receipt), JSON.stringify({ ...result, signed })).catch(() => undefined)
+  await $.state.set({ plugin: 'via', key: 'reports', id: agentId }, signed)
+  return yield* retained(w, $, adapter, e, agentId, signed)
+}
+
 // What one run needs, settled before it starts.
 type Drive = {
   adapter: Adapter
@@ -390,6 +486,20 @@ async function* drive(w: World, $: EngineInterface, d: Drive): AsyncGenerator<Tu
   for (;;) {
     const session = (await $.state.get({ plugin: 'via', key: 'sessions', id: agentId })).value
     const inbox = adapter.steer ? await openInbox($, adapter.name, agentId, w.inboxes) : undefined
+    const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
+    const receipt: Receipt | undefined = home
+      ? {
+          turnId: e.turnId,
+          path: `${home}/.claude/via/runs/${encodeURIComponent(agentId)}/${encodeURIComponent(e.turnId)}/${block}`,
+          scope: `${agentId}/${encodeURIComponent(e.turnId)}-${block}`,
+          choice: chosen,
+          mode,
+          session,
+          ...(inbox ? { inbox: inbox.path } : {}),
+          ...(/^\/compact\b/.test(prompt.trim()) ? { compact: true } : {}),
+        }
+      : undefined
+    if (receipt) await remember(w, $, agentId, { harness: adapter.name, handback: await handbackOf(w, $, agentId), run: receipt })
     result = yield* run(w, adapter, $, {
       agentId,
       choice: chosen,
@@ -403,6 +513,12 @@ async function* drive(w: World, $: EngineInterface, d: Drive): AsyncGenerator<Tu
       block,
       guard,
       probe,
+      ...(receipt
+        ? {
+            durable: { path: receipt.path, scope: receipt.scope, recover: false },
+            complete: (result: RunResult) => $.fs.write(answerPath(receipt), JSON.stringify(result)),
+          }
+        : {}),
       // Saved the moment the harness issues it: a reload mid-run must not lose the session.
       save: async (id) => {
         if (id !== session) await $.state.set({ plugin: 'via', key: 'sessions', id: agentId }, id)

@@ -33,6 +33,7 @@ export type Steps = {
   spawns: Map<string, string> // by an Agent tool_use id a step made: the harness subagent it shows
   jobs: Map<string, Job> // by agent id
   calls: Map<string, { agentId: string; id: string; input?: Extract<Mark, { kind: 'call-start' }>['input'] }> // by tool_use_id
+  keepSpawn?: (id: string, key: string) => Promise<void>
 }
 
 // The Agent calls a step makes for a harness's subagents: approved without the mode's classifier, which
@@ -100,6 +101,7 @@ export async function* pump(
         job.count += 1
         const id = `${CHILD_CALL}${e.turnId.replace(/[^A-Za-z0-9_]/g, '_')}_${job.count}`
         w.spawns.set(id, c.child)
+        await w.keepSpawn?.(id, c.child)
         const input = { description: c.title, prompt: c.description || c.title, subagent_type: c.type, run_in_background: true }
         const index = block(-1 - job.count)
         yield { kind: 'tool', index, id, name: 'Agent' }

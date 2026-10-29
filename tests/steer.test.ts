@@ -1,6 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-
-import { arrange, bottom, ENV, hang, hold, lines, node, run, type Spawn, split, type Write } from './helpers'
+import { arrange, bottom, ENV, hang, hold, lines, node, requestOf, run, type Spawn, split, storage, type Write } from './helpers'
 
 test('a SendMessage to a live pi agent is steered into its inbox', async ($, on) => {
   const clock = mock.clock(on)
@@ -127,7 +126,10 @@ test('the inbox is cleared when the pi run ends', async ($, on) => {
   expect(writes.at(-1)?.text).toContain('also do B')
   await clock.advance(30 * 60 * 1000)
   await pending
-  expect(writes.at(-1)).toEqual({ path: '/home/u/.claude/via/inbox/pi-a1.jsonl', text: '' })
+  expect(writes.filter((write) => write.path === '/home/u/.claude/via/inbox/pi-a1.jsonl').at(-1)).toEqual({
+    path: '/home/u/.claude/via/inbox/pi-a1.jsonl',
+    text: '',
+  })
 })
 
 test('a steer pi consumed is not reported as undelivered', async ($, on) => {
@@ -229,6 +231,7 @@ test('an interrupt: message aborts the running pi step, then runs on the same se
   const clock = mock.clock(on)
   const spawns: Spawn[] = []
   const writes: Write[] = []
+  const files = storage(on)
   mock.env(on, ENV)
   on('agent.list', () => ({ value: [{ id: 'a1', description: 'x', type: 'via:pi', status: 'running' }] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
@@ -241,12 +244,13 @@ test('an interrupt: message aborts the running pi step, then runs on the same se
   })
   on('fs.write', (_, e) => {
     writes.push({ path: e.path, text: e.text })
+    files.set(e.path, e.text)
     if (e.text.includes('"interrupt"')) interrupted()
     return { value: undefined }
   })
   const start = { type: 'message_start', message: { role: 'assistant', provider: 'openrouter', model: 'kimi' } }
   on('process.spawn', async function* (_, e) {
-    spawns.push({ argv: [...e.argv], input: e.input, env: e.env })
+    spawns.push(requestOf(e))
     if (spawns.length === 1) {
       yield {
         stream: 'stdout' as const,

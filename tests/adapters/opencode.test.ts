@@ -3,7 +3,7 @@ import { relayEvents } from '../../hooks/acp/events'
 import { opencode, opencodeRun } from '../../hooks/adapters/opencode'
 import { run as runHook } from '../../hooks/run'
 import type { World } from '../../hooks/world'
-import { ROOT, run, runTurn, STEP } from '../helpers'
+import { ROOT, requestOf, run, runTurn, STEP, storage } from '../helpers'
 
 type TestOn = Parameters<TestBody>[1]
 type Spawn = { argv: string[]; input: string | undefined; env?: Record<string, string> }
@@ -55,6 +55,7 @@ function arrange(
   o: { mode?: string; writes?: Write[] } = {},
 ) {
   mock.clock(on)
+  const files = storage(on)
   mock.env(on, { HOME: '/home/u' })
   on('agent.list', () => ({ value: [AGENT] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
@@ -63,11 +64,12 @@ function arrange(
   on('process.run', () => ({ value: { exitCode: 0, stdout: '24.11.0\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('state.get', (_, e, next) => (e.key === 'modes' && o.mode ? { value: { value: o.mode, version: 1 } } : next(e)))
   on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
     o.writes?.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
   on('process.spawn', async function* (_, e) {
-    spawns.push({ argv: [...e.argv], input: e.input, env: e.env })
+    spawns.push(requestOf(e))
     if (out.stdout) yield { stream: 'stdout' as const, text: out.stdout }
     if (out.stderr) yield { stream: 'stderr' as const, text: out.stderr }
     return { value: { code: out.code ?? 0, signal: null } }

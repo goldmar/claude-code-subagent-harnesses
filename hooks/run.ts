@@ -5,6 +5,7 @@ import type { Adapter, Ask, Mode } from './adapter'
 import { closeChildren, route } from './children'
 import { stepOf } from './progress'
 import { nearestModels } from './prompt'
+import { helperOf, journalChildren } from './recovery'
 import { finish, type Totals } from './report'
 import type { Inbox } from './steer'
 import { answerAsk, closeInbox, undeliveredSteers } from './steer'
@@ -35,6 +36,9 @@ export type RunInput = {
   // Awaited only to sign, so a probe never delays the run or outlives an interrupted one.
   probe(session: string | undefined): Promise<string | undefined>
   save(session: string): Promise<void>
+  durable?: { path: string; recover: boolean; scope?: string }
+  shownChildren?: ReadonlySet<string>
+  complete?(result: RunResult): Promise<void>
 }
 
 const PLAN_MARKS: Record<string, string> = { pending: '☐', in_progress: '◐', completed: '☑' }
@@ -43,7 +47,24 @@ export async function* run(
   w: World,
   adapter: Adapter,
   $: Pick<EngineInterface, 'process' | 'clock' | 'plugin' | 'fs' | 'env' | 'ui'>,
-  { agentId, choice, prompt, signal, inbox, session, block = 0, guard, mode, installed, models = [], probe, save }: RunInput,
+  {
+    agentId,
+    choice,
+    prompt,
+    signal,
+    inbox,
+    session,
+    block = 0,
+    guard,
+    mode,
+    installed,
+    models = [],
+    probe,
+    save,
+    durable,
+    complete,
+    shownChildren,
+  }: RunInput,
 ): AsyncGenerator<TurnStepChunk | Mark, RunResult> {
   const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
   const row = async (text: string) => {
@@ -52,7 +73,7 @@ export async function* run(
   }
   const description = stepOf(w.descriptions.get(agentId) ?? '')
   const named = description ? `${description} · ` : ''
-  const request = adapter.start({ choice, prompt, session, agentId, root: $.plugin.root, inbox: inbox?.path, guard, mode, installed })
+  const request = () => adapter.start({ choice, prompt, session, agentId, root: $.plugin.root, inbox: inbox?.path, guard, mode, installed })
   let issued: string | undefined
   let latest = session
   let index = block - 1
@@ -67,6 +88,8 @@ export async function* run(
   let error = ''
   let steered = 0
   let touched = false
+  let childAt = 0
+  const childScope = durable?.scope ?? agentId
   // A /compact prompt that compacted and said nothing has the compaction as its answer.
   const compacting = new Set<string>()
   let compacted = false
@@ -128,7 +151,17 @@ export async function* run(
           chunks.push(...close('interrupted'))
           break
         case 'ask':
-          asks.push(event.ask)
+          if (
+            !durable?.recover ||
+            !inbox?.lines.some((line) => {
+              try {
+                return JSON.parse(line)?.answer === event.ask.id
+              } catch {
+                return false
+              }
+            })
+          )
+            asks.push(event.ask)
           break
         case 'notice':
           notices.push(event.t)
@@ -144,14 +177,16 @@ export async function* run(
           chunks.push(push('thinking', event.t))
           break
         case 'call': {
-          kind = undefined
           open.add(event.id)
           if (event.kind === 'compact') compacting.add(event.id)
+          if (durable?.recover) break
+          kind = undefined
           const input = { kind: event.kind, title: event.title, ...(event.path ? { path: event.path } : {}) }
           chunks.push({ kind: 'call-start', id: event.id, input, usage: usageNow() })
           break
         }
         case 'plan': {
+          if (durable?.recover) break
           // A row of its own, opened and closed at once, as Claude Code's own to-do list is: only on a change.
           const listed = event.entries.map((entry) => `${PLAN_MARKS[entry.status] ?? '☐'} ${entry.content}`).join('\n')
           if (listed === plan) break
@@ -166,12 +201,17 @@ export async function* run(
         case 'called':
           if (!open.delete(event.id)) break
           if (compacting.has(event.id) && !event.failed) compacted = true
+          if (durable?.recover) break
           chunks.push({ kind: 'call-end', id: event.id, output: event.output, failed: event.failed })
           break
         case 'child':
         case 'of': {
           // Only a spawn, a step of its own, ends the text block it falls in.
-          const marks = route(w, agentId, `${$.plugin.name}:${adapter.name}`, event)
+          const marks = durable?.recover
+            ? journalChildren(w, durable.path, childScope, `${$.plugin.name}:${adapter.name}`, ++childAt, event)
+                .pending.splice(0)
+                .filter((mark) => mark.kind !== 'spawn' || !shownChildren?.has(mark.child))
+            : route(w, childScope, `${$.plugin.name}:${adapter.name}`, event)
           if (marks.length > 0) kind = undefined
           chunks.push(...marks)
           break
@@ -192,11 +232,19 @@ export async function* run(
     return chunks
   }
   await row('')
-  const child = $.process.spawn(request)
+  const child = $.process.spawn(
+    durable
+      ? {
+          argv: ['node', helperOf($), durable.recover ? 'follow' : 'start', durable.path],
+          ...(durable.recover ? {} : { input: JSON.stringify({ ...request(), timeoutMs: w.timeoutMinutes * 60_000 }) }),
+        }
+      : request(),
+  )
   const pieces = child[Symbol.asyncIterator]()
   let timer: Timer | undefined
   let stopped: 'limit' | 'abort' | undefined
   let exited = false
+  let terminal = false
   try {
     const until = new Promise<'limit' | 'abort'>((resolve) => {
       if (signal.aborted) resolve('abort')
@@ -244,6 +292,7 @@ export async function* run(
       yield* take(buffer)
       if (issued !== undefined) await save(issued)
       const exit = await child.result
+      terminal = !durable || (exit.code !== null && exit.code !== 200)
       const known = adapter.failure?.(exit, stderr)
       if (known?.sessionLost) await save('')
       if (exit.code === 0 && !report.trim() && compacted && /^\/compact\b/.test(prompt.trim()) && known === undefined && !error)
@@ -273,15 +322,23 @@ export async function* run(
   } catch (err) {
     failure = `${adapter.name} could not run (is it installed and on PATH?): ${String(err)}`
   } finally {
-    // However the run ends, its harness ends with it: a limit, an Esc, or a step no hook reads on. Not
-    // awaited, so a child slow to go cannot hold up the rest.
-    if (!exited) void Promise.resolve(pieces.return?.(undefined as never)).catch(() => {})
+    // An explicit stop cancels the worker and waits for its receipt. Unloading a follower preserves
+    // the worker: its own deadline still applies, and the next process follows its journal.
+    let cancelled = false
+    if (!exited) {
+      if (durable && (stopped !== undefined || signal.aborted))
+        cancelled =
+          (await $.process.run(['node', helperOf($), 'cancel', durable.path], { timeoutMs: 7500 }).catch(() => undefined))?.exitCode === 0
+      void Promise.resolve(pieces.return?.(undefined as never)).catch(() => {})
+    }
     timer?.cancel()
     w.activity.delete(agentId)
     // Its subagents ran in the harness: nothing more can come from them.
-    closeChildren(w, agentId, stopped === undefined ? undefined : 'the harness run was stopped')
+    const detached = durable && !terminal && !cancelled
+    if (!detached) closeChildren(w, childScope, stopped === undefined ? undefined : 'the harness run was stopped')
     await row('')
-    if (inbox) await closeInbox($, inbox, agentId, w.inboxes)
+    if (inbox && !detached) await closeInbox($, inbox, agentId, w.inboxes)
+    else if (inbox) w.inboxes.delete(agentId)
   }
   yield* close(
     stopped === 'limit'
@@ -291,7 +348,11 @@ export async function* run(
         : 'the run ended before this call finished',
   )
 
-  if (stopped === 'abort') return { aborted: true, signed: '', usage: null, block: index }
+  if (stopped === 'abort') {
+    const result = { aborted: true, signed: '', usage: null, block: index }
+    await complete?.(result).catch(() => undefined)
+    return result
+  }
 
   // The abort's own failure is not the answer: the interrupt's message runs next, after the steers it cut off.
   // A run that finished before the abort, or hit the time limit, keeps its answer; the interrupt is undelivered.
@@ -320,6 +381,9 @@ export async function* run(
     total: last,
     push,
   })
+  const result = { aborted: false, signed: done.signed, usage: done.usage, block: index + 1 }
+  // The terminal receipt precedes the final text yield: a renderer can disappear at either yield.
+  await complete?.(result).catch(() => undefined)
   yield* done.chunks
-  return { aborted: false, signed: done.signed, usage: done.usage, block: index + 1 }
+  return result
 }

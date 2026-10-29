@@ -7,6 +7,7 @@ import { respond, textChunks } from './handback'
 import { HARNESSES } from './harnesses'
 import { cachedModels, refreshModels } from './models'
 import { descriptionOf, isModel, promptOf } from './prompt'
+import { helperOf, ROSTER_UNAVAILABLE, roster, spawnOf } from './recovery'
 import { notActivePrompt } from './run'
 import { sendMessage, steer, typed } from './steer'
 import { adapterOf, remember, turnStep } from './turn'
@@ -190,7 +191,10 @@ export const register: Register = (on, options) => {
     const [plugin, name = ''] = (e.subagentType ?? '').split(':')
     const adapter = plugin === $.plugin.name ? world.adapters.get(name) : undefined
     // A harness's subagent, which via shows from its parent's run: no harness of its own to choose.
-    const key = adapter && e.tool_use_id.startsWith(CHILD_CALL) ? world.spawns.get(e.tool_use_id) : undefined
+    const key =
+      adapter && e.tool_use_id.startsWith(CHILD_CALL)
+        ? (world.spawns.get(e.tool_use_id) ?? (await spawnOf($, e.parentAgentId, e.tool_use_id)))
+        : undefined
     if (adapter && key !== undefined) {
       world.spawns.delete(e.tool_use_id)
       // In the foreground the parent's step would wait on a nested agent that waits on the parent's run.
@@ -205,6 +209,12 @@ export const register: Register = (on, options) => {
         world.agents.set(started.agentId, adapter)
         world.nested.set(started.agentId, { key })
         world.handbacks.set(started.agentId, e.permissionMode === 'auto')
+        const parent = key.slice(0, key.indexOf('/'))
+        await remember(world, $, started.agentId, {
+          harness: adapter.name,
+          handback: e.permissionMode === 'auto',
+          nested: { key, parent, run: (await roster($))[parent]?.run },
+        })
       }
       return started
     }
@@ -273,9 +283,13 @@ export const register: Register = (on, options) => {
     return done
   })
 
-  on('turn.complete', async (_, e, next) => {
+  on('turn.complete', async ($, e, next) => {
     world.turns.delete(e.turnId)
     for (const [agentId, job] of world.jobs) if (job.turnId === e.turnId) endJob(world, agentId)
+    if (e.isAborted && e.agentId) {
+      const receipt = (await roster($))[e.agentId]?.run
+      if (receipt?.turnId === e.turnId) await $.process.run(['node', helperOf($), 'cancel', receipt.path], { timeoutMs: 7500 })
+    }
     return next(e)
   })
 
@@ -301,6 +315,8 @@ export const register: Register = (on, options) => {
     return yield* turnStep(world, $, e, next)
   }).catch(async function* (_, e, next) {
     const adapter = e.agentId === undefined ? undefined : world.agents.get(e.agentId)
+    if (!adapter && next.error.message?.includes(ROSTER_UNAVAILABLE))
+      return yield* respond(e, textChunks(ROSTER_UNAVAILABLE), ROSTER_UNAVAILABLE)
     if (!adapter) return yield* next(e)
     // A skipped hook would send this harness's model id to Anthropic. End the via turn instead.
     endJob(world, e.agentId as string)

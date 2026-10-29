@@ -5,6 +5,7 @@ import { codex } from '../hooks/adapters/codex'
 import { opencode } from '../hooks/adapters/opencode'
 import { pi } from '../hooks/adapters/pi'
 import { helpOf } from '../hooks/prompt'
+import { storage } from './helpers'
 
 type On = Parameters<TestBody>[1]
 
@@ -20,6 +21,7 @@ const SPAWN: AgentSpawnInput = {
 }
 
 function spawned(on: On): string[] {
+  storage(on)
   const models: string[] = []
   on('agent.spawn', (_, e) => {
     models.push(e.model ?? '')
@@ -83,6 +85,7 @@ test("a via agent's precompute is skipped", async ($, on) => {
 })
 
 test("another agent's compaction runs as Claude Code's", async ($, on) => {
+  storage(on)
   on('agent.list', () => ({ value: [] }))
   on('session.compact', () => ({ messages: [row('user', 'summary')] }))
   const result = await $.session.compact({ trigger: 'auto', agentId: 'b1', messages: ROWS })

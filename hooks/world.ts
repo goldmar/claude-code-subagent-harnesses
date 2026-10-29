@@ -2,6 +2,7 @@ import type { Steps } from './acp/steps'
 import type { Adapter } from './adapter'
 import type { Children } from './children'
 import type { Activity } from './progress'
+import type { Replay } from './recovery'
 import type { Inbox } from './steer'
 
 // wake: a nested agent's end that reached a via agent as a new turn, which runs nothing.
@@ -20,6 +21,7 @@ export type World = Steps &
     handbacks: Map<string, boolean>
     modes: Map<string, string> // Claude Code's permission mode at the spawn
     agents: Map<string, Adapter>
+    replays?: Map<string, Replay>
     roster?: Promise<void> // spawns write the stored roster one at a time, or parallel spawns drop each other
     others: Set<string>
     inboxes: Map<string, Inbox>

@@ -1,4 +1,4 @@
-import type { SessionMessage, TurnStepChunk } from 'claude-code'
+import type { ProcessSpawnRequest, SessionMessage, TurnStepChunk } from 'claude-code'
 import { expect, mock, type TestBody } from 'claude-code/testing'
 
 type TestDollar = Parameters<TestBody>[0]
@@ -17,6 +17,14 @@ export const STUB = {
 } as const
 export type Spawn = { argv: string[]; input: string | undefined; env?: Record<string, string> }
 export type Write = { path: string; text: string }
+
+// Adapter assertions inspect the request sent through the durable supervisor; the supervisor itself
+// has process-transition tests with real local children in relay/test/durable.test.mjs.
+export function requestOf(e: ProcessSpawnRequest): Spawn {
+  const request: ProcessSpawnRequest =
+    e.argv[1]?.endsWith('/relay/src/durable.mts') && e.argv[2] === 'start' ? JSON.parse(e.input ?? '{}') : e
+  return { argv: [...request.argv], input: request.input, env: request.env }
+}
 const AGENT = { id: 'a1', description: 'x', type: 'via:pi', status: 'running' } as const
 const EVENTS = [
   { type: 'message_start', message: { role: 'assistant', provider: 'openrouter', model: 'kimi' } },
@@ -60,11 +68,28 @@ export function expectPiSpawn(spawn: Spawn | undefined, root: string, extra: str
 
 export const ENV = { TMPDIR: '/tmp', HOME: '/home/u' }
 
+export function storage(on: TestOn, options: { get?: (key: string) => unknown; read?: boolean } = {}) {
+  const store = new Map<string, unknown>()
+  const files = new Map<string, string>()
+  on('store.get', (_, e, next) => {
+    const value = options.get ? options.get(e.key) : store.get(e.key)
+    return value !== undefined || e.key === 'agents' ? { value } : next(e)
+  })
+  on('store.set', (_, e) => {
+    store.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined }
+  })
+  if (options.read !== false) on('fs.read', (_, e, next) => (files.has(e.path) ? { value: files.get(e.path) ?? '' } : next(e)))
+  return files
+}
+
 export function bottom(on: TestOn, writes?: Write[] | 'reject', env: Record<string, string> = ENV, version = NODE.stdout) {
+  const files = storage(on)
   mock.env(on, env)
   on('agent.list', () => ({ value: [AGENT] }))
   on('fs.write', (_, e) => {
     if (writes === 'reject') throw new Error('EROFS')
+    files.set(e.path, e.text)
     writes?.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
@@ -91,7 +116,7 @@ export function arrange(
   bottom(on, writes, ENV, version)
   on('session.messages', () => ({ value: rows }))
   on('process.spawn', async function* (_, e) {
-    spawns.push({ argv: [...e.argv], input: e.input, env: e.env })
+    spawns.push(requestOf(e))
     yield* pieces
     return { value: { code, signal: null } }
   })
@@ -112,7 +137,7 @@ export function hang(on: TestOn, spawns: Spawn[], writes?: Write[], env: Record<
   bottom(on, writes, env)
   on('session.messages', () => ({ value: [] }))
   on('process.spawn', async function* (_, e, next) {
-    spawns.push({ argv: [...e.argv], input: e.input, env: e.env })
+    spawns.push(requestOf(e))
     yield { stream: 'stdout' as const, text: `${events.map((event) => JSON.stringify(event)).join('\n')}\n` }
     await new Promise<void>((resolve) => {
       if (next.signal.aborted) resolve()
@@ -130,7 +155,7 @@ export function hold(on: TestOn, spawns: Spawn[], writes: Write[], before: unkno
     release = resolve
   })
   on('process.spawn', async function* (_, e) {
-    spawns.push({ argv: [...e.argv], input: e.input, env: e.env })
+    spawns.push(requestOf(e))
     yield { stream: 'stdout' as const, text: `${before.map((event) => JSON.stringify(event)).join('\n')}\n` }
     await released
     yield { stream: 'stdout' as const, text: `${after.map((event) => JSON.stringify(event)).join('\n')}\n` }
