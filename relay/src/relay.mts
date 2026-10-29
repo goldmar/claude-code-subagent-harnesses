@@ -250,9 +250,7 @@ const result = await acp
       if (typeof value !== 'string') fail(`RELAY_CONFIG.${configId} must be a string`)
       const set = await ctx
         .request(acp.methods.agent.session.setConfigOption, { sessionId, configId, value: value as string })
-        .catch((error: unknown) =>
-          fail(`the agent refused ${configId} ${String(value)}: ${String((error as { message?: unknown })?.message ?? error)}`),
-        )
+        .catch((error: unknown) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error)}`))
       configOptions = set.configOptions ?? configOptions
     }
     const current = configOptions.find((o) => o.id === 'model')

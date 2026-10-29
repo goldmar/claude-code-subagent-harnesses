@@ -68,6 +68,7 @@ Optional lines at the top of the prompt configure the harness, one per line, and
 | `model: <model>` | The harness's model; `via-help` lists the ones the harness offers you, read from the harness itself |
 | `tools: read` | Read-only, whatever the permission mode; see [Permissions](#permissions). pi also takes a tool list: `read` is read-only; any other list, such as `-bash,read`, can still edit and loads the project's .pi extensions |
 | `thinking: <level>` | Reasoning effort; a level the harness or model lacks is refused |
+| `tier: fast\|default` | Codex only: fast mode on or off; persists until replaced in an idle follow-up |
 | `via-help` | Replies with that harness's lines and levels instead of running it |
 
 ```text
@@ -75,6 +76,8 @@ tools: read
 thinking: high
 Why does the login test fail on CI but not locally?
 ```
+
+For Codex, add `tier: fast` before the task to request fast mode. Send `tier: default` at the top of an idle follow-up to switch it off. Fast mode uses more of your plan and depends on the model supporting it. Tier lines in messages to a running agent are plain text; wait until it is idle to change tier. Without a tier line, via keeps the saved choice, or the harness's default on the first run.
 
 ## How it works
 

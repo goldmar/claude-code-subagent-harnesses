@@ -117,6 +117,7 @@ export const codex = {
       session,
       model: choice.model,
       thinking: choice.thinking,
+      config: choice.tier ? { 'fast-mode': choice.tier === 'fast' ? 'on' : 'off' } : undefined,
       command: ['node', installed],
       ...(readOnly ? { env: guard } : {}),
     })

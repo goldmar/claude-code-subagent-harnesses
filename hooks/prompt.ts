@@ -2,9 +2,9 @@ import type { HelpAdapter, PromptAdapter } from './adapter'
 
 // A model never starts with '-': passed as its own argument, it would read as a flag. A pi tool list may
 // (-bash,read removes bash), since it always follows --tools.
-const VALUE = { model: /^[A-Za-z0-9_.:/*~@+][A-Za-z0-9_.:/*~@+-]*$/, tools: /^[A-Za-z0-9_*+,:.-]+$/, thinking: /^\S+$/ }
+const VALUE = { model: /^[A-Za-z0-9_.:/*~@+][A-Za-z0-9_.:/*~@+-]*$/, tools: /^[A-Za-z0-9_*+,:.-]+$/, thinking: /^\S+$/, tier: /^\S+$/ }
 type PromptKey = keyof typeof VALUE
-const NEUTRAL_LINE = /^(model|tools|thinking):[ \t]*(.*?)[ \t]*$/
+const NEUTRAL_LINE = /^(model|tools|thinking|tier):[ \t]*(.*?)[ \t]*$/
 const ALIAS_LINE = /^([A-Za-z]+)-([A-Za-z]+):[ \t]*(.*?)[ \t]*$/
 const HELP_LINE = /^([A-Za-z]+)-help[ \t]*$/i
 
@@ -13,6 +13,7 @@ export type PromptSpec = {
   model?: string
   tools?: string
   thinking?: string
+  tier?: 'fast' | 'default'
   help?: boolean
   error?: string
 }
@@ -54,10 +55,14 @@ export function promptOf(text: string, adapter: PromptAdapter): PromptSpec {
     const bad = (why: string) => ({ prompt: text, error: `Invalid ${adapter.name} prompt line ${JSON.stringify(line)}: ${why}` })
     if (!(key in VALUE))
       return bad(
-        `unknown key; known keys are model, tools and thinking (or ${adapter.name}-model, ${adapter.name}-tools and ${adapter.name}-thinking).`,
+        `unknown key; known keys are model, tools and thinking (or ${adapter.name}-model, ${adapter.name}-tools and ${adapter.name}-thinking)${adapter.name === 'codex' ? ', plus tier (or codex-tier)' : ''}.`,
       )
     if (!VALUE[key as PromptKey].test(value)) return bad('expected one whitespace-free value.')
-    if (key === 'thinking') {
+    if (key === 'tier') {
+      if (adapter.name !== 'codex') return bad(`${label} is not supported: tier is codex only.`)
+      if (value !== 'fast' && value !== 'default') return bad(`${label} must be one of fast, default; got ${JSON.stringify(value)}.`)
+      asked.tier ??= value
+    } else if (key === 'thinking') {
       if (adapter.thinking.length === 0) return bad(`${label} is not supported: ${adapter.name} takes no thinking level.`)
       if (!adapter.thinking.includes(value))
         return bad(`${label} must be one of ${adapter.thinking.join(', ')}; got ${JSON.stringify(value)}.`)
@@ -95,6 +100,7 @@ export function helpOf(adapter: HelpAdapter, models: readonly string[]): string 
   if (adapter.thinking.length > 0)
     lines.push(`thinking: <level>   passed to ${name} as its thinking level: ${adapter.thinking.join(', ')}.`)
   else lines.push(`thinking:           refused: ${name} takes no thinking level.`)
+  if (name === 'codex') lines.push('tier: fast|default  fast mode on or off; change it in an idle follow-up, not a running message.')
   lines.push(
     adapter.defaultModel
       ? `Model precedence: a model line, then the plugin's defaultModel setting, then ${name}'s own default.`

@@ -10252,9 +10252,7 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
   }
   for (const [configId, value] of Object.entries(extra)) {
     if (typeof value !== "string") fail(`RELAY_CONFIG.${configId} must be a string`);
-    const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId, value }).catch(
-      (error2) => fail(`the agent refused ${configId} ${String(value)}: ${String(error2?.message ?? error2)}`)
-    );
+    const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId, value }).catch((error2) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error2)}`));
     configOptions = set.configOptions ?? configOptions;
   }
   const current = configOptions.find((o) => o.id === "model");

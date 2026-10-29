@@ -299,8 +299,13 @@ async function* begin(
     ...(asked.model ? { model: asked.model } : {}),
     ...(asked.tools ? { tools: asked.tools } : {}),
     ...(asked.thinking ? { thinking: asked.thinking } : {}),
+    ...(asked.tier ? { tier: asked.tier } : {}),
   }
-  const changed = merged.model !== held.value?.model || merged.tools !== held.value?.tools || merged.thinking !== held.value?.thinking
+  const changed =
+    merged.model !== held.value?.model ||
+    merged.tools !== held.value?.tools ||
+    merged.thinking !== held.value?.thinking ||
+    merged.tier !== held.value?.tier
   if (changed) await $.state.set(ref, merged)
 
   // What the person allows Claude itself, as the spawn carried it: plan mode is read-only here too.
