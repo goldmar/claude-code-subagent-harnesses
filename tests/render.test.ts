@@ -2,7 +2,7 @@ import type { RenderElement, RenderInput, RenderPropsOf } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 const TOOL = 'mcp__plugin_via_step__step'
-const call = (index: number): RenderPropsOf['ToolGroup']['calls'][number] => ({
+const call = (index: number): RenderPropsOf['ToolGroup']['calls'][number] & { tool_use_id: string } => ({
   tool_use_id: `toolu_step_t1_${index}`,
   tool: TOOL,
   input: { kind: 'execute', title: `echo ${index}` },
