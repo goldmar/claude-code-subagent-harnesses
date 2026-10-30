@@ -3,6 +3,8 @@ import { unhidden } from './text'
 
 // What a call that reported no output answers; its row shows none.
 export const NO_OUTPUT = 'Done; no output reported.'
+// What a call answers when its command runs on past a step; a continuation call stands in for it.
+export const STILL_RUNNING = 'The harness tool is still running'
 
 // A diff's lines and a plan's entries are what the row is for, so more of them show before it folds;
 // a compaction's summary is not, as Claude Code keeps its own behind ctrl+o.
@@ -39,8 +41,13 @@ export function drawCall(props: RenderPropsOf['ToolUse']): RenderElement {
   const title = typeof input.title === 'string' ? unhidden(input.title).replace(/\s+/g, ' ') : ''
   const path = typeof input.path === 'string' ? unhidden(input.path) : ''
   const [running, done] = VERBS[kind] ?? ['', '']
-  const verb = props.isInterrupted ? 'Interrupted' : props.isErrored ? 'Failed' : props.isRunning ? running : done
   const said = typeof props.output === 'string' ? unhidden(props.output).trim() : ''
+  // Its continuation's row follows and shows the command: the folded view draws this one as nothing,
+  // and ctrl+o as running, never as a command that ran.
+  const continued = said.startsWith(STILL_RUNNING)
+  if (continued && !props.isExpanded) return { type: 'Box', children: [] }
+  const live = props.isRunning || continued
+  const verb = props.isInterrupted ? 'Interrupted' : props.isErrored ? 'Failed' : live ? running : done
   const output = said === NO_OUTPUT ? '' : said
   const lines = output ? output.split('\n') : []
   const shown = props.isExpanded ? lines : lines.slice(0, FOLDED[kind] ?? 3)
@@ -58,7 +65,7 @@ export function drawCall(props: RenderPropsOf['ToolUse']): RenderElement {
         type: 'Text',
         children: verb
           ? [{ type: 'Text', props: { bold: true }, children: [verb] }, ' ', named]
-          : [{ type: 'Text', props: { bold: true }, children: [named] }, ...(props.isRunning ? ['…'] : [])],
+          : [{ type: 'Text', props: { bold: true }, children: [named] }, ...(live ? ['…'] : [])],
       },
       ...shown.map((line, i) => outputLine(line, i === 0, diff)),
       ...(more > 0

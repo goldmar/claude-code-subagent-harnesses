@@ -1,5 +1,5 @@
 import type { Timer, TurnStepChunk, TurnStepResult, TurnUsage } from 'claude-code'
-import { NO_OUTPUT } from './render'
+import { NO_OUTPUT, STILL_RUNNING } from './render'
 
 // One step per harness tool call. A run outlives the step that started it: each tool call the
 // harness reports ends a step with a call to the plugin's own tool, whose tool.call hook (answerCall)
@@ -223,7 +223,7 @@ export async function answerCall(
           usage: null,
         })
         w.calls.delete(toolUseId as string)
-        return { result: 'The harness tool is still running.' }
+        return { result: `${STILL_RUNNING}.` }
       }
       job.reading = undefined
       if (r.done) {

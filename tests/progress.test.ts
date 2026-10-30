@@ -284,6 +284,14 @@ test('a call that names a file links its title to it', () => {
   expect(JSON.stringify(drawCall(call({ input: { kind: 'read', title: 'x', path: 'rel/a.ts' } })))).not.toContain('Link')
 })
 
+test('a call answered while its command still runs gives way to its continuation row', () => {
+  const answered = { output: 'The harness tool is still running.' }
+  expect(texts(drawCall(call(answered)))).toEqual([])
+  expect(texts(drawCall(call({ ...answered, isExpanded: true }))).join('|')).toBe(
+    'Running| |npm test|  ⎿  The harness tool is still running.',
+  )
+})
+
 test('a run ended from outside while parked between pieces stops its harness', async () => {
   let killed = false
   const world = {
