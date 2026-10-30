@@ -19,7 +19,14 @@ const textOf = (node: unknown): string =>
       ? ((node as { children?: unknown[] }).children ?? []).map(textOf).join('')
       : ''
 
-test('nested command rows keep their exact title and output after group expansion', async ($, on) => {
+const texts = (node: unknown): string[] =>
+  typeof node === 'string'
+    ? [node]
+    : typeof node === 'object' && node !== null
+      ? ((node as { children?: unknown[] }).children ?? []).flatMap(texts)
+      : []
+
+test('nested command rows keep their exact title and output inside a drawn group', async ($, on) => {
   const title = "sed -n '120,180p' src/example/long_module_name_for_wrapping.py; sed…"
   const output = 'first check PASS, selected count 7\nsecond check PASS\nthird check PASS'
   const calls = Array.from({ length: 10 }, (_, index) => call(index + 1))
@@ -31,18 +38,15 @@ test('nested command rows keep their exact title and output after group expansio
     return { type: 'Text', children: ['native rows'] }
   })
   for (const surface of ['terminal', 'desktop'] as const) {
-    await $.ui.render({
+    const drawn = (await $.ui.render({
       surface,
       component: 'ToolGroup',
       requestId: 'nested-group',
       props: { calls, isActive: true, isExpanded: false, isCallsOnly: true },
-    })
-    const group = seen.at(-1)
-    if (group?.component !== 'ToolGroup') throw new Error('Expected native tool rows')
-    expect(group.props).toEqual({ calls, isActive: true, isExpanded: true, isCallsOnly: true })
-    // The installed flicker fix delegates separate rows instead of drawing a counted summary.
-    // Keep the exact-output regression from the superseded grouped renderer on this live path.
-    const row = (await $.ui.render({ surface, component: 'ToolUse', requestId: 'nested-command', props: calls[9] })) as RenderElement
+    })) as { children: { children: RenderElement[] }[] }
+    expect(seen).toHaveLength(0)
+    // The group draws each call's own row: keep the exact-output regression on that live path.
+    const row = drawn.children[9]?.children[0] as RenderElement
     expect(row.type).toBe('Box')
     expect(row.props?.flexDirection).toBe('column')
     expect(row.children?.map(textOf)).toEqual([
@@ -54,33 +58,58 @@ test('nested command rows keep their exact title and output after group expansio
   }
 })
 
-test('step rows stay expanded as commands arrive, finish, and render again from history', async ($, on) => {
+test('step groups draw as rows as commands arrive, finish, and render again from history', async ($, on) => {
   const seen: RenderInput[] = []
   on('ui.render', (_, e) => {
     seen.push(e)
-    return { type: 'Text', children: ['native rows'] }
+    return { type: 'Text', children: ['native'] }
   })
   for (const surface of ['terminal', 'desktop'] as const) {
     for (const count of [1, 2, 3]) {
       const calls = Array.from({ length: count }, (_, index) => call(index + 1))
       for (const isActive of [true, false, false]) {
-        const current = calls.map((call, index) => ({ ...call, isRunning: isActive && index === count - 1 }))
+        const current = calls.map((call, index) => {
+          const isRunning = isActive && index === count - 1
+          return { ...call, isRunning, output: isRunning ? undefined : call.output }
+        })
         const props = { calls: current, isActive, isExpanded: false, isCallsOnly: true }
-        const before = seen.length
-        await $.ui.render({ surface, component: 'ToolGroup', requestId: `group-${surface}`, props })
-        expect(seen.length).toBe(before + 1)
-        const rendered = seen.at(-1)
-        if (rendered?.component !== 'ToolGroup') throw new Error('Expected native tool rows')
-        expect(rendered.props).toEqual({ ...props, isExpanded: true })
-        // Rendering must preserve the original rows and input object, including their stable ids.
+        const drawn = await $.ui.render({ surface, component: 'ToolGroup', requestId: `group-${surface}`, props })
+        const rows = (drawn as { children: { props: { key: string } }[] }).children
+        // One row per call, keyed by its id, in order; never the engine's counted line.
+        expect(rows.map((row) => row.props.key)).toEqual(current.map((c) => c.tool_use_id))
+        expect(texts(drawn).join('|')).toBe(
+          current.map((c, i) => (c.isRunning ? `Running| |echo ${i + 1}` : `Ran| |echo ${i + 1}|  ⎿  ${i + 1}`)).join('|'),
+        )
         expect(props.isExpanded).toBe(false)
-        expect(rendered.props.calls).toEqual(current)
       }
     }
   }
+  expect(seen).toHaveLength(0)
 })
 
-test('mixed groups, non-call groups, empty groups, and expanded groups keep native rendering', async ($, on) => {
+test('a row in a drawn group folds its output as a standalone row does', async ($) => {
+  const output = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join('\n')
+  const props = { calls: [{ ...call(1), output }], isActive: false, isExpanded: false, isCallsOnly: true }
+  const drawn = await $.ui.render({ surface: 'terminal', component: 'ToolGroup', requestId: 'long', props })
+  expect(texts(drawn).join('|')).toBe('Ran| |echo 1|  ⎿  line 1|     line 2|     line 3|     … 47 more lines (ctrl+o to expand)')
+})
+
+test('a failed or interrupted call keeps its group as rows instead of the engine count', async ($, on) => {
+  const seen: RenderInput[] = []
+  on('ui.render', (_, e) => {
+    seen.push(e)
+    return { type: 'Text', children: ['native'] }
+  })
+  for (const failed of [{ isErrored: true }, { isInterrupted: true }]) {
+    const props = { calls: [call(1), { ...call(2), ...failed }], isActive: false, isExpanded: false, isCallsOnly: false }
+    const drawn = await $.ui.render({ surface: 'terminal', component: 'ToolGroup', requestId: 'failed', props })
+    expect(texts(drawn)[0]).toBe('Ran')
+    expect(texts(drawn).join('')).toContain(failed.isErrored ? 'Failed echo 2' : 'Interrupted echo 2')
+  }
+  expect(seen).toHaveLength(0)
+})
+
+test('mixed groups, groups with other rows, empty groups, and expanded groups keep native rendering', async ($, on) => {
   const seen: RenderInput[] = []
   on('ui.render', (_, e) => {
     seen.push(e)

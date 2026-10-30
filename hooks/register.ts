@@ -1,5 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { drawCall } from './acp/render'
+import { drawCall, drawRows } from './acp/render'
 import { answerCall, CHILD_CALL, endJob, waitStep } from './acp/steps'
 import type { Adapter } from './adapter'
 import { waitChild, woken } from './children'
@@ -322,15 +322,14 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'ToolUse' }, (_, e, next) => (e.props.tool === world.tool ? drawCall(e.props) : next(e)))
   // Keep step rows in place: folding replaces them with a count as later calls arrive, which flickers.
-  // Delegate expanded groups to the engine so each call still uses its ToolUse renderer.
-  on('ui.render', { component: 'ToolGroup' }, (_, e, next) =>
-    !e.props.isExpanded &&
-    e.props.isCallsOnly === true &&
-    e.props.calls.length > 0 &&
-    e.props.calls.every((call) => call.tool === world.tool)
-      ? next({ ...e, props: { ...e.props, isExpanded: true } })
-      : next(e),
-  )
+  // A failed or interrupted call also clears isCallsOnly; its group stays rows, not the engine's count.
+  // Only a group with other rows (hook timings, recalled memories) and no such call keeps the engine's.
+  on('ui.render', { component: 'ToolGroup' }, (_, e, next) => {
+    const { calls, isCallsOnly, isExpanded } = e.props
+    const ours = calls.length > 0 && calls.every((call) => call.tool === world.tool)
+    const plain = isCallsOnly === true || calls.some((call) => call.isErrored || call.isInterrupted)
+    return !isExpanded && ours && plain ? drawRows(e.props) : next(e)
+  })
   // The row shows the output already, all of it when expanded.
   on('ui.render', { component: 'ToolResult' }, (_, e, next) => (e.props.tool === world.tool ? { type: 'Box', children: [] } : next(e)))
 

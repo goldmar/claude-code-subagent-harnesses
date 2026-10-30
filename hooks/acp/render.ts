@@ -80,3 +80,18 @@ export function drawCall(props: RenderPropsOf['ToolUse']): RenderElement {
     ],
   }
 }
+
+// A run of harness calls as rows, each folded as a standalone row is. Unfolding the group in the engine
+// would draw every row at full length, as ctrl+o does; one tree for the whole group also shows a call
+// that joins it together with the rows already there, never a frame later.
+export function drawRows(props: RenderPropsOf['ToolGroup']): RenderElement {
+  return {
+    type: 'Box',
+    props: { flexDirection: 'column' },
+    children: props.calls.map((call, i) => ({
+      type: 'Box' as const,
+      props: { key: call.tool_use_id ?? `via-row-${i}` },
+      children: [drawCall({ ...call, tool_use_id: call.tool_use_id ?? '', isExpanded: false })],
+    })),
+  }
+}
