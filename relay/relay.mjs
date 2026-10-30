@@ -10273,10 +10273,7 @@ var choose = (options, kind) => {
   return { outcome: option ? { outcome: "selected", optionId: option.optionId } : { outcome: "cancelled" } };
 };
 var stream = sessionUpdates(
-  ndJsonStream2(
-    Writable.toWeb(agent.stdin),
-    Readable.toWeb(agent.stdout)
-  ),
+  ndJsonStream2(Writable.toWeb(agent.stdin), Readable.toWeb(agent.stdout)),
   // Count only: an unrecognized payload or tag may carry private agent output.
   (count) => out({ relay: "ignored_session_update", count })
 );
