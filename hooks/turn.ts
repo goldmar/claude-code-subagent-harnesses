@@ -180,8 +180,12 @@ async function* nestedStep(
   nested: { key: string; report?: string },
   signal: AbortSignal,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+  // session.append makes a native user row without submitting another task or steering Codex twice.
+  const user = async (text: string) => {
+    await $.session.append({ agentId, message: { type: 'user', content: [{ type: 'text', text }] } })
+  }
   const job = w.jobs.get(agentId)
-  if (job !== undefined) return yield* pump(w, job, e, signal)
+  if (job !== undefined) return yield* pump(w, job, e, signal, user)
   if (nested.report !== undefined) return yield* retained(w, $, adapter, e, agentId, nested.report)
   const kept = (await roster($))[agentId]
   const receipt = kept?.nested?.run ?? (kept?.nested ? (await roster($))[kept.nested.parent]?.run : undefined)
@@ -215,7 +219,7 @@ async function* nestedStep(
     count: 0,
   }
   w.jobs.set(agentId, started)
-  return yield* pump(w, started, e, signal)
+  return yield* pump(w, started, e, signal, user)
 }
 
 async function* nestedRun(

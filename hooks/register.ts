@@ -204,8 +204,15 @@ export const register: Register = (on, options) => {
         if (channel) channel.read = true
         return { deny: "via shows a harness's subagent only as a background agent, and background tasks are off" }
       }
-      const model = world.channels.get(key)?.model
-      const started = await next({ ...e, model: model ?? adapter.name, ...(model ? { description: `${e.description} · ${model}` } : {}) })
+      const channel = world.channels.get(key)
+      const model = channel?.model
+      const title = channel?.title ?? e.description
+      const started = await next({
+        ...e,
+        prompt: channel?.description ?? e.prompt,
+        model: model ?? adapter.name,
+        description: model ? `${title} · ${model}` : title,
+      })
       if (started.agentId) {
         world.agents.set(started.agentId, adapter)
         world.nested.set(started.agentId, { key })

@@ -8,6 +8,7 @@ export type Usage = {
 
 export type Norm =
   | { readonly k: 'message' } // a new assistant message starts: only the last one is the answer
+  | { readonly k: 'user'; readonly t: string } // a complete parent-to-child message, displayed as user input
   | { readonly k: 'session'; readonly id: string } // harness-issued id, saved at once for follow-ups
   | { readonly k: 'model'; readonly name: string }
   | { readonly k: 'text' | 'thinking' | 'tool'; readonly t: string }

@@ -10,6 +10,7 @@ import { NO_OUTPUT } from './render'
 // A harness tool call starting or ending, for pump to make a call to the plugin's tool of; never reaches the engine.
 // usage: the run's last model call, for the step that ends with the call.
 export type Mark =
+  | { kind: 'user'; text: string }
   | { kind: 'call-start'; id: string; input: { kind: string; title: string; path?: string }; usage: TurnUsage | null }
   | { kind: 'call-end'; id: string; output: string; failed: boolean }
   // A harness's subagent to show as an agent nested under this one: the step calls the Agent tool.
@@ -100,6 +101,7 @@ export async function* pump(
   job: Job,
   e: { turnId: string; index: number; agentId?: string },
   signal: AbortSignal,
+  user?: (text: string) => Promise<void>,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
   const unlend = lend(job, signal)
   // Block indexes start again at each step.
@@ -127,6 +129,10 @@ export async function* pump(
       }
       if (c.kind === 'call-end') {
         job.outputs.set(c.id, { output: c.output, failed: c.failed })
+        continue
+      }
+      if (c.kind === 'user') {
+        await user?.(c.text)
         continue
       }
       if (c.kind === 'spawn') {

@@ -226,7 +226,7 @@ function sessionEvents(cwdOf: () => string) {
 }
 
 // What a subagent's session says that its nested agent shows; its usage is its own context, not the run's.
-const SHOWN: ReadonlySet<string> = new Set(['message', 'text', 'thinking', 'plan', 'call', 'called'])
+const SHOWN: ReadonlySet<string> = new Set(['message', 'user', 'text', 'thinking', 'plan', 'call', 'called'])
 
 // A parser per run. Updates before the first prompt are a resumed session's history, replayed by
 // session/load: never part of this answer.
@@ -236,6 +236,22 @@ export function relayEvents(): (line: string) => Norm[] {
   let root: string | undefined
   const own = sessionEvents(() => cwd)
   const children = new Map<string, ReturnType<typeof sessionEvents>>()
+  const sessions = new Map<string, string>() // Codex thread id -> announced ACP child session id
+  const inputs = new Map<string, { id: unknown; text: string }>()
+  const echoes = new Map<string, string>()
+  const collaboration = new Map<string, { title?: string; input?: Record<string, unknown> }>()
+  const sent = new Set<string>()
+  const of = (child: string, norm: Norm): Norm => ({ k: 'of', child, norm })
+  const flush = (session: string): Norm[] => {
+    const input = inputs.get(session)
+    if (!input) return []
+    inputs.delete(session)
+    const echo = echoes.get(session)
+    echoes.delete(session)
+    if (!input.text || input.text === echo) return []
+    children.get(session)?.steered()
+    return [of(session, { k: 'user', t: input.text })]
+  }
   return (line) => {
     let e: unknown
     try {
@@ -288,6 +304,9 @@ export function relayEvents(): (line: string) => Norm[] {
     const session = typeof e.sessionId === 'string' ? e.sessionId : root
     if (u.sessionUpdate === 'subagent_update') {
       if (typeof u.sessionId !== 'string' || session === undefined) return []
+      const thread = u.sessionId.split(':subagent:').at(-1) ?? u.sessionId
+      if (!sessions.has(thread) && typeof u.description === 'string') echoes.set(u.sessionId, u.description)
+      sessions.set(thread, u.sessionId)
       const now = isRecord(u.state) ? u.state : undefined
       const state = typeof now?.state === 'string' ? now.state : undefined
       // A child's work that ended in a failure says so only here: v1 has no prompt response for it.
@@ -299,6 +318,7 @@ export function relayEvents(): (line: string) => Norm[] {
             : 'error'
           : undefined
       return [
+        ...(state === 'idle' ? flush(u.sessionId) : []),
         {
           k: 'child',
           id: u.sessionId,
@@ -310,20 +330,64 @@ export function relayEvents(): (line: string) => Norm[] {
         },
       ]
     }
-    // Another session's update is a subagent's only once the run's own session is known.
-    if (root === undefined || session === undefined || session === root) return own.read(u)
+    const out: Norm[] = []
+    // codex-acp suppresses live child userMessage items. Its collaboration reporter carries the
+    // complete steering prompt and receiver thread ids on sendInput/followupTask instead.
+    if ((u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') && typeof u.toolCallId === 'string') {
+      const key = `${session}/${u.toolCallId}`
+      const held = collaboration.get(key) ?? {}
+      if (typeof u.title === 'string') held.title = u.title
+      if (isRecord(u.rawInput)) held.input = u.rawInput
+      if (held.title === 'sendInput' || held.title === 'followupTask') {
+        collaboration.set(key, held)
+        if (u.status === 'completed' && !sent.has(key)) {
+          sent.add(key)
+          collaboration.delete(key)
+          const input = held.input
+          if (typeof input?.prompt === 'string' && input.prompt && Array.isArray(input.receiverThreadIds)) {
+            for (const receiver of new Set(input.receiverThreadIds)) {
+              const child = typeof receiver === 'string' ? sessions.get(receiver) : undefined
+              if (!child) continue
+              // Some ACP producers echo input before the collaboration call completes.
+              if (inputs.get(child)?.text === input.prompt) inputs.delete(child)
+              else out.push(...flush(child))
+              out.push(of(child, { k: 'user', t: input.prompt }))
+              echoes.set(child, input.prompt)
+              children.get(child)?.steered()
+            }
+          }
+        } else if (u.status === 'failed') collaboration.delete(key)
+      }
+    }
+    // The root already has its real user rows. Only child input needs a transcript copy.
+    if (root === undefined || session === undefined || session === root) return [...out, ...own.read(u)]
+    if (u.sessionUpdate === 'user_message_chunk') {
+      const content = u.content
+      if (!isRecord(content) || content.type !== 'text' || typeof content.text !== 'string') return out
+      const previous = inputs.get(session)
+      if (previous && previous.id !== u.messageId) out.push(...flush(session))
+      const input = inputs.get(session) ?? { id: u.messageId, text: '' }
+      input.text += content.text
+      inputs.set(session, input)
+      return out
+    }
+    if (['agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update', 'plan'].includes(u.sessionUpdate)) {
+      out.unshift(...flush(session))
+      // An input echo precedes the reply. The same words sent again after work are new input.
+      echoes.delete(session)
+    }
     // The model a subagent runs on, as its session's config reports it (one select of category model).
     if (u.sessionUpdate === 'config_option_update') {
       const option = (Array.isArray(u.configOptions) ? u.configOptions : []).find((o) => isRecord(o) && o.category === 'model')
       const value = isRecord(option) && typeof option.currentValue === 'string' ? option.currentValue : undefined
-      return value ? [{ k: 'of', child: session, norm: { k: 'model', name: value } }] : []
+      return value ? [...out, of(session, { k: 'model', name: value })] : out
     }
     let child = children.get(session)
     if (child === undefined) {
       child = sessionEvents(() => cwd)
       children.set(session, child)
     }
-    return child.read(u).flatMap((norm): Norm[] => (SHOWN.has(norm.k) ? [{ k: 'of', child: session, norm }] : []))
+    return [...out, ...child.read(u).flatMap((norm): Norm[] => (SHOWN.has(norm.k) ? [of(session, norm)] : []))]
   }
 }
 
