@@ -1,5 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
+import * as steps from '../hooks/acp/steps'
 import { pi } from '../hooks/adapters/pi'
+import { keepSpawn, remember } from '../hooks/recovery'
 import { run as runHook } from '../hooks/run'
 import type { World } from '../hooks/world'
 import { lines, NODE, run, STEP, storage } from './helpers'
@@ -450,7 +452,6 @@ test('detaching a durable follower preserves the producer inbox and its monotoni
 })
 
 test('a roster write that fails once does not cancel the writes after it', async ($, on) => {
-  const { keepSpawn, remember } = await import('../hooks/recovery')
   let fail = true
   const store = new Map<string, unknown>()
   on('store.get', (_, e) => {
@@ -474,17 +475,16 @@ test('a roster write that fails once does not cancel the writes after it', async
 })
 
 test('a failed spawn mapping write still shows the child and keeps the run going', async () => {
-  const steps = await import('../hooks/acp/steps')
-  const job: import('../hooks/acp/steps').Job = {
+  const job: steps.Job = {
     turnId: 't1',
     count: 0,
     abort: new AbortController(),
     outputs: new Map(),
     held: [{ kind: 'spawn', child: 'a1/t1-0/child#1', type: 'via:codex', title: 'child' }],
     // Never read: the held spawn ends the step first.
-    gen: (async function* () {})() as import('../hooks/acp/steps').Job['gen'],
+    gen: (async function* () {})() as steps.Job['gen'],
   }
-  const world: import('../hooks/acp/steps').Steps = {
+  const world: steps.Steps = {
     tool: 'mcp__plugin_via_step__step',
     spawns: new Map(),
     jobs: new Map([['a1', job]]),
