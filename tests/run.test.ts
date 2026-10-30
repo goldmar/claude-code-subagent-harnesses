@@ -1,6 +1,6 @@
 import type { TurnStepChunk, TurnStepResult } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
-import { answerCall, CHILD_CALL, pump } from '../hooks/acp/steps'
+import { answerCall, CHILD_CALL, pump, waitStep } from '../hooks/acp/steps'
 import { pi } from '../hooks/adapters/pi'
 import { turnStep } from '../hooks/turn'
 import type { World } from '../hooks/world'
@@ -420,6 +420,7 @@ test('an aborted follow-up leaves no report for a step with no turn to repeat', 
     env: { get: async (name: string) => (name === 'HOME' ? ENV.HOME : undefined) },
     fs: { write: async () => undefined },
     clock: { after: () => ({ cancel: () => {} }) },
+    viaSteps: { wait: ({ agentId }: { agentId: string }) => waitStep(world, agentId, () => ({ cancel: () => {} })) },
     process: {
       run: async () => NODE,
       spawn: () => {

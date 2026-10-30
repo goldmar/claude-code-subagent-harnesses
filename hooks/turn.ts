@@ -185,7 +185,7 @@ async function* nestedStep(
     await $.session.append({ agentId, message: { type: 'user', content: [{ type: 'text', text }] } })
   }
   const job = w.jobs.get(agentId)
-  if (job !== undefined) return yield* pump(w, job, e, signal, user)
+  if (job !== undefined) return yield* pump(w, job, e, signal, () => $.viaSteps.wait({ agentId }), user)
   if (nested.report !== undefined) return yield* retained(w, $, adapter, e, agentId, nested.report)
   const kept = (await roster($))[agentId]
   const receipt = kept?.nested?.run ?? (kept?.nested ? (await roster($))[kept.nested.parent]?.run : undefined)
@@ -219,7 +219,7 @@ async function* nestedStep(
     count: 0,
   }
   w.jobs.set(agentId, started)
-  return yield* pump(w, started, e, signal, user)
+  return yield* pump(w, started, e, signal, () => $.viaSteps.wait({ agentId }), user)
 }
 
 async function* nestedRun(
@@ -252,14 +252,14 @@ export async function* turnStep(w: World, $: Parameters<StepHook>[0], e: Paramet
   const job = w.jobs.get(agentId)
   if (job !== undefined) {
     const turn = w.turns.get(e.turnId)
-    if (job.turnId === e.turnId || turn === undefined || turn.wake) return yield* pump(w, job, e, next.signal)
+    if (job.turnId === e.turnId || turn === undefined || turn.wake) return yield* pump(w, job, e, next.signal, () => $.viaSteps.wait({ agentId }))
     endJob(w, agentId)
   }
   const started = yield* begin(w, adapter, $, e, agentId)
   if (started === undefined) return yield* respond(e, [{ kind: 'stop', stopReason: 'end_turn', usage: null }], '')
   if ('answer' in started) return started
   w.jobs.set(agentId, started)
-  return yield* pump(w, started, e, next.signal)
+  return yield* pump(w, started, e, next.signal, () => $.viaSteps.wait({ agentId }))
 }
 
 // Everything before the run: refusals answer at once; otherwise the run as a job.

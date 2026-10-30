@@ -69,6 +69,36 @@ export async function waitStep(w: Steps, agentId: string, after: (wake: () => vo
   }
 }
 
+// A read can outlive the hook that started it. Reuse it when a later step joins.
+function read(job: Job): Promise<IteratorResult<TurnStepChunk | Mark, TurnStepResult>> {
+  job.reading ??= job.gen.next()
+  return job.reading
+}
+
+async function take(job: Job): Promise<IteratorResult<TurnStepChunk | Mark, TurnStepResult>> {
+  const result = await read(job)
+  job.reading = undefined
+  return result
+}
+
+// The current step joins an inherited read through an engine noun. Bound each noun
+// reply below its own ten-second deadline, even during a long model/tool silence.
+export async function waitStep(w: Steps, agentId: string, after: (wake: () => void) => Timer): Promise<void> {
+  const job = w.jobs.get(agentId)
+  if (!job || job.final !== undefined || job.abort.signal.aborted) return
+  let timer: Timer | undefined
+  try {
+    await Promise.race([
+      read(job),
+      new Promise<void>((resolve) => {
+        timer = after(resolve)
+      }),
+    ])
+  } finally {
+    timer?.cancel()
+  }
+}
+
 // The Agent calls a step makes for a harness's subagents: approved without the mode's classifier, which
 // judges only a model's own calls, and their nested agents run as via's.
 export const CHILD_CALL = 'toolu_via_child_'
@@ -101,6 +131,7 @@ export async function* pump(
   job: Job,
   e: { turnId: string; index: number; agentId?: string },
   signal: AbortSignal,
+  wait?: () => Promise<void>,
   user?: (text: string) => Promise<void>,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
   const unlend = lend(job, signal)
@@ -119,7 +150,9 @@ export async function* pump(
         w.jobs.delete(e.agentId ?? '')
         return { ...job.final, turnId: e.turnId, index: e.index }
       } else {
-        const r = await take(job)
+        const r = wait ? await Promise.race([read(job), wait().then(() => undefined)]) : await take(job)
+        if (r === undefined) continue
+        job.reading = undefined
         if (r.done) {
           // A generator ended from outside returns nothing: without a final, this loop would spin.
           job.final = r.value ?? ended(e.turnId)
