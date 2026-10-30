@@ -451,17 +451,20 @@ test('detaching a durable follower preserves the producer inbox and its monotoni
   expect(cancelled).toBe(false)
 })
 
-test('a roster write that fails once does not cancel the writes after it', async ($, on) => {
+test('a roster write that fails once does not cancel the writes after it', async () => {
   let fail = true
-  const store = new Map<string, unknown>()
-  on('store.get', (_, e) => {
-    if (fail) throw new Error('synthetic store hiccup')
-    return { value: store.get(e.key) }
-  })
-  on('store.set', (_, e) => {
-    store.set(e.key, e.value)
-    return { value: undefined }
-  })
+  const saved = new Map<string, unknown>()
+  const $ = {
+    store: {
+      get: async (key: string) => {
+        if (fail) throw new Error('synthetic store hiccup')
+        return saved.get(key)
+      },
+      set: async (key: string, value: unknown) => {
+        saved.set(key, value)
+      },
+    },
+  } as unknown as Parameters<typeof remember>[1]
   const world = {} as World
   const first = await remember(world, $, 'a1', { harness: 'pi', handback: false }).then(
     () => 'written',
@@ -471,7 +474,7 @@ test('a roster write that fails once does not cancel the writes after it', async
   fail = false
   await remember(world, $, 'a2', { harness: 'pi', handback: false })
   await keepSpawn(world, $, 'toolu_via_child_t_1', 'a2/t-0/child#1')
-  expect(Object.keys(store.get('agents') as object)).toEqual(['a2'])
+  expect(Object.keys(saved.get('agents') as object)).toEqual(['a2'])
 })
 
 test('a failed spawn mapping write still shows the child and keeps the run going', async () => {
