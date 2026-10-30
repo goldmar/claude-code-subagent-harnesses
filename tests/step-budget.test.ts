@@ -92,7 +92,7 @@ test('an aborted run ends its step instead of waiting again and again for a read
     if (waits > 3) throw new Error('waited again on an aborted run')
     // The engine's bounded timer: it fires once the old run is aborted, at once after that.
     await steps.waitStep(world, 'fixture', (wake) => {
-      if (job.abort.signal.aborted) queueMicrotask(wake)
+      if (job.abort.signal.aborted) void Promise.resolve().then(wake)
       else job.abort.signal.addEventListener('abort', wake, { once: true })
       return { cancel: () => {} }
     })
@@ -137,7 +137,7 @@ test('a tool call joins the read an earlier step left pending, in order', async 
   }
   // A step's bounded wait ends while the producer read is still pending: the read is retained.
   await steps.waitStep(world, 'fixture', (wake) => {
-    queueMicrotask(wake)
+    void Promise.resolve().then(wake)
     return { cancel: () => {} }
   })
   const answer = steps.answerCall(world, 'toolu_one', new AbortController().signal)
