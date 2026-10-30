@@ -52,8 +52,10 @@ function updateRoster(
       .slice(-(ROSTER_KEPT - 1))
     await $.store.set(ROSTER, Object.fromEntries([...others, [agentId, kept]]))
   }
-  w.roster = (w.roster ?? Promise.resolve()).then(write)
-  return w.roster
+  // Each caller sees its own write's failure; a failed write must not cancel every later one.
+  const written = (w.roster ?? Promise.resolve()).catch(() => undefined).then(write)
+  w.roster = written
+  return written
 }
 export function helperOf($: Pick<EngineInterface, 'plugin'>): string {
   return `${$.plugin.root}/relay/src/durable.mts`

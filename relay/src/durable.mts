@@ -4,7 +4,18 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -20,6 +31,7 @@ const requestFile = `${dir}/request.json`
 const ownerFile = `${dir}/owner.json`
 const cancelled = `${dir}/cancel`
 const MAX_BYTES = 64 * 1024 * 1024
+const WORKER_START_MS = 30_000
 let maxBytes = MAX_BYTES
 let written = 0
 let outputLimit = () => {}
@@ -155,7 +167,16 @@ if (mode === 'work') {
       if (count > 0) continue
       quiet += 1
       if (quiet > 30) {
-        if (!existsSync(ownerFile)) unavailable()
+        // The detached worker names itself only once node has started, which a loaded host may take
+        // seconds to do: until the admission is old, a missing owner is a start still under way.
+        if (!existsSync(ownerFile)) {
+          const admitted = existsSync(`${dir}/admission`) ? statSync(`${dir}/admission`).mtimeMs : 0
+          if (Date.now() - admitted < WORKER_START_MS) {
+            await sleep(100)
+            continue
+          }
+          unavailable()
+        }
         const owner = JSON.parse(readFileSync(ownerFile, 'utf8')) as { pid: number; deadline: number }
         try {
           process.kill(owner.pid, 0)

@@ -448,3 +448,56 @@ test('detaching a durable follower preserves the producer inbox and its monotoni
   expect(files.get(inbox.path)).toBe(`${inbox.lines[0]}\n`)
   expect(cancelled).toBe(false)
 })
+
+test('a roster write that fails once does not cancel the writes after it', async ($, on) => {
+  const { keepSpawn, remember } = await import('../hooks/recovery')
+  let fail = true
+  const store = new Map<string, unknown>()
+  on('store.get', (_, e) => {
+    if (fail) throw new Error('synthetic store hiccup')
+    return { value: store.get(e.key) }
+  })
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  const world = {} as World
+  const first = await remember(world, $, 'a1', { harness: 'pi', handback: false }).then(
+    () => 'written',
+    (error: unknown) => String(error),
+  )
+  expect(first).toContain('retained run mappings')
+  fail = false
+  await remember(world, $, 'a2', { harness: 'pi', handback: false })
+  await keepSpawn(world, $, 'toolu_via_child_t_1', 'a2/t-0/child#1')
+  expect(Object.keys(store.get('agents') as object)).toEqual(['a2'])
+})
+
+test('a failed spawn mapping write still shows the child and keeps the run going', async () => {
+  const steps = await import('../hooks/acp/steps')
+  const job: import('../hooks/acp/steps').Job = {
+    turnId: 't1',
+    count: 0,
+    abort: new AbortController(),
+    outputs: new Map(),
+    held: [{ kind: 'spawn', child: 'a1/t1-0/child#1', type: 'via:codex', title: 'child' }],
+    // Never read: the held spawn ends the step first.
+    gen: (async function* () {})() as import('../hooks/acp/steps').Job['gen'],
+  }
+  const world: import('../hooks/acp/steps').Steps = {
+    tool: 'mcp__plugin_via_step__step',
+    spawns: new Map(),
+    jobs: new Map([['a1', job]]),
+    calls: new Map(),
+    keepSpawn: async () => {
+      throw new Error('synthetic store failure')
+    },
+  }
+  const stream = steps.pump(world, job, { turnId: 't1', index: 0, agentId: 'a1' }, new AbortController().signal)
+  let result = await stream.next()
+  while (!result.done) result = await stream.next()
+  expect(result.value.stopReason).toBe('tool_use')
+  expect(result.value.toolUses[0]?.name).toBe('Agent')
+  expect(job.abort.signal.aborted).toBe(false)
+  expect([...world.spawns.values()]).toEqual(['a1/t1-0/child#1'])
+})

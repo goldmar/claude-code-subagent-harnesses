@@ -153,7 +153,8 @@ export async function* pump(
         job.count += 1
         const id = `${CHILD_CALL}${e.turnId.replace(/[^A-Za-z0-9_]/g, '_')}_${job.count}`
         w.spawns.set(id, c.child)
-        await w.keepSpawn?.(id, c.child)
+        // Only for a reload: w.spawns holds it in this process, so a failed write must not end the run.
+        await w.keepSpawn?.(id, c.child).catch(() => undefined)
         const input = { description: c.title, prompt: c.description || c.title, subagent_type: c.type, run_in_background: true }
         const index = block(-1 - job.count)
         yield { kind: 'tool', index, id, name: 'Agent' }

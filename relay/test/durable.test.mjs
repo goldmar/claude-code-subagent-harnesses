@@ -157,3 +157,26 @@ test('cancellation before admission leaves a tombstone and never launches a late
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a follower waits for a worker that is slow to start instead of calling the run unavailable', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'via-durable-'))
+  const run = join(dir, 'run')
+  try {
+    // Admitted, but the detached worker has not written its owner yet.
+    await mkdir(run, { mode: 0o700 })
+    await writeFile(join(run, 'admission'), 'synthetic', { mode: 0o600 })
+    await writeFile(join(run, 'events.jsonl'), '', { mode: 0o600 })
+    const follower = start('follow', run)
+    await new Promise((resolve) => setTimeout(resolve, 4000))
+    await writeFile(join(run, 'owner.json'), JSON.stringify({ pid: process.pid, deadline: Date.now() + 60_000 }), { mode: 0o600 })
+    await writeFile(
+      join(run, 'events.jsonl'),
+      `${JSON.stringify({ stream: 'stdout', text: 'late start\n' })}\n${JSON.stringify({ code: 0, signal: null })}\n`,
+    )
+    const followed = await follower.result
+    assert.equal(followed.code, 0, followed.stderr)
+    assert.equal(followed.stdout, 'late start\n')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
