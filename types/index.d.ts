@@ -21,6 +21,14 @@ declare module 'claude-code' {
       reports: StateFamily<string>
       handedBack: StateFamily<boolean>
       modes: StateFamily<string>
+      stepErrors: StateFamily<{
+        kind: string
+        message: string
+        stack?: string
+        stackOrigin: string
+        turnId: string
+        index: number
+      }>
     }
   }
 }

@@ -331,13 +331,37 @@ export const register: Register = (on, options) => {
   // The row shows the output already, all of it when expanded.
   on('ui.render', { component: 'ToolResult' }, (_, e, next) => (e.props.tool === world.tool ? { type: 'Box', children: [] } : next(e)))
 
+  // The engine's catch metadata keeps a message but drops the thrown Error's stack.
+  // Keep it only for this invocation, without retaining turns or private task content.
+  const stepErrors = new WeakMap<object, unknown>()
   on('turn.step', async function* ($, e, next) {
-    return yield* turnStep(world, $, e, next)
-  }).catch(async function* (_, e, next) {
+    try {
+      return yield* turnStep(world, $, e, next)
+    } catch (error) {
+      stepErrors.set(e, error)
+      throw error
+    }
+  }).catch(async function* ($, e, next) {
     const adapter = e.agentId === undefined ? undefined : world.agents.get(e.agentId)
     if (!adapter && next.error.message?.includes(ROSTER_UNAVAILABLE))
       return yield* respond(e, textChunks(ROSTER_UNAVAILABLE), ROSTER_UNAVAILABLE)
     if (!adapter) return yield* next(e)
+    const original = stepErrors.get(e)
+    stepErrors.delete(e)
+    const message = original instanceof Error ? original.message : (next.error.message ?? `turn.step ${next.error.kind}`)
+    const diagnostic = {
+      ...next.error,
+      message,
+      stack: original instanceof Error ? original.stack : new Error(message).stack,
+      stackOrigin: original instanceof Error ? 'throw' : 'catch',
+      turnId: e.turnId,
+      index: e.index,
+    }
+    // Either sink may be unavailable; diagnostics must not prevent the safe handback.
+    await Promise.allSettled([
+      $.ui.log(`via turn.step failed: ${JSON.stringify(diagnostic)}`),
+      $.state.set({ plugin: 'via', key: 'stepErrors', id: e.agentId as string }, diagnostic),
+    ])
     // A skipped hook would send this harness's model id to Anthropic. End the via turn instead.
     endJob(world, e.agentId as string)
     const report = `The ${adapter.name}${world.nested.has(e.agentId as string) ? ' subagent' : ''} failed: via could not render its next step.`
