@@ -78,6 +78,15 @@ function ended(turnId: string): TurnStepResult {
   return { turnId, index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
 }
 
+// Aborted (Esc, a new turn) with the run parked at a yield, which nothing would pull on to the race that
+// stops it: ending it runs its cleanup, which stops the harness. A wait would only return at once.
+function halted(job: Job): boolean {
+  if (!job.abort.signal.aborted) return false
+  job.final ??= ended(job.turnId)
+  void job.gen.return(undefined as never).catch(() => {})
+  return true
+}
+
 // Stops a run no step will read again: a new turn, or the turn's end.
 export function endJob(w: Steps, agentId: string): void {
   const job = w.jobs.get(agentId)
@@ -117,9 +126,11 @@ export async function* pump(
       const heldChunk = job.held.shift()
       if (heldChunk !== undefined) c = heldChunk
       else if (job.final !== undefined) {
-        w.jobs.delete(e.agentId ?? '')
+        // A new turn may already hold this agent's slot.
+        if (w.jobs.get(e.agentId ?? '') === job) w.jobs.delete(e.agentId ?? '')
         return { ...job.final, turnId: e.turnId, index: e.index }
-      } else {
+      } else if (halted(job)) continue
+      else {
         const r = wait ? await Promise.race([read(job), wait().then(() => undefined)]) : await take(job)
         if (r === undefined) continue
         job.reading = undefined
@@ -199,14 +210,7 @@ export async function answerCall(
         w.calls.delete(toolUseId as string)
         return done.failed ? { result: done.output || 'failed', isError: true } : { result: done.output || NO_OUTPUT }
       }
-      if (job.final !== undefined) return { result: 'The harness run ended before this call finished.' }
-      // Aborted (Esc) with the run parked at a yield, which nothing would pull on to the race that stops it:
-      // ending it runs its cleanup, which stops the harness.
-      if (job.abort.signal.aborted) {
-        job.final ??= ended(job.turnId)
-        void job.gen.return(undefined as never).catch(() => {})
-        return { result: 'The harness run ended before this call finished.' }
-      }
+      if (job.final !== undefined || halted(job)) return { result: 'The harness run ended before this call finished.' }
       const r = await Promise.race([read(job), progress, ...(wait ? [wait(ref.agentId).then(() => 'wake' as const)] : [])])
       if (r === 'wake') continue
       if (r === undefined) {
