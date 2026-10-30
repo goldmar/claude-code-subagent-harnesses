@@ -313,9 +313,12 @@ export const register: Register = (on, options) => {
       (wake) => $.clock.after(30_000, wake),
       (agentId) => $.viaSteps.wait({ agentId }),
     ),
-  ).catch(() => ({
-    deny: 'via could not report this harness tool call.',
-  }))
+  ).catch(async ($, _, next) => {
+    // The row shows only the denial: keep why in the local log, as a failed step does.
+    const { kind, message } = next.error
+    await Promise.allSettled([$.ui.log(`via tool.call failed: ${JSON.stringify({ kind, message })}`)])
+    return { deny: 'via could not report this harness tool call.' }
+  })
 
   on('ui.render', { component: 'ToolUse' }, (_, e, next) => (e.props.tool === world.tool ? drawCall(e.props) : next(e)))
   // Keep step rows in place: folding replaces them with a count as later calls arrive, which flickers.
