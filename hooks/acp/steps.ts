@@ -69,36 +69,6 @@ export async function waitStep(w: Steps, agentId: string, after: (wake: () => vo
   }
 }
 
-// A read can outlive the hook that started it. Reuse it when a later step joins.
-function read(job: Job): Promise<IteratorResult<TurnStepChunk | Mark, TurnStepResult>> {
-  job.reading ??= job.gen.next()
-  return job.reading
-}
-
-async function take(job: Job): Promise<IteratorResult<TurnStepChunk | Mark, TurnStepResult>> {
-  const result = await read(job)
-  job.reading = undefined
-  return result
-}
-
-// The current step joins an inherited read through an engine noun. Bound each noun
-// reply below its own ten-second deadline, even during a long model/tool silence.
-export async function waitStep(w: Steps, agentId: string, after: (wake: () => void) => Timer): Promise<void> {
-  const job = w.jobs.get(agentId)
-  if (!job || job.final !== undefined || job.abort.signal.aborted) return
-  let timer: Timer | undefined
-  try {
-    await Promise.race([
-      read(job),
-      new Promise<void>((resolve) => {
-        timer = after(resolve)
-      }),
-    ])
-  } finally {
-    timer?.cancel()
-  }
-}
-
 // The Agent calls a step makes for a harness's subagents: approved without the mode's classifier, which
 // judges only a model's own calls, and their nested agents run as via's.
 export const CHILD_CALL = 'toolu_via_child_'
