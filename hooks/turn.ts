@@ -252,7 +252,8 @@ export async function* turnStep(w: World, $: Parameters<StepHook>[0], e: Paramet
   const job = w.jobs.get(agentId)
   if (job !== undefined) {
     const turn = w.turns.get(e.turnId)
-    if (job.turnId === e.turnId || turn === undefined || turn.wake) return yield* pump(w, job, e, next.signal, () => $.viaSteps.wait({ agentId }))
+    if (job.turnId === e.turnId || turn === undefined || turn.wake)
+      return yield* pump(w, job, e, next.signal, () => $.viaSteps.wait({ agentId }))
     endJob(w, agentId)
   }
   const started = yield* begin(w, adapter, $, e, agentId)
