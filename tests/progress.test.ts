@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { drawCall, NO_OUTPUT } from '../hooks/acp/render'
+import { drawCall, drawGroup, NO_OUTPUT } from '../hooks/acp/render'
 import { pi } from '../hooks/adapters/pi'
 import { stepOf } from '../hooks/progress'
 import { run as runHook } from '../hooks/run'
@@ -282,6 +282,58 @@ test('a call that names a file links its title to it', () => {
   expect(odd).toContain('file:///my%20repo/%231.ts')
   expect(JSON.stringify(drawCall(call({ input: { kind: 'read', title: 'x', path: '/a/what?.ts' } })))).toContain('file:///a/what%3F.ts')
   expect(JSON.stringify(drawCall(call({ input: { kind: 'read', title: 'x', path: 'rel/a.ts' } })))).not.toContain('Link')
+})
+
+const group = (kinds: unknown[], isActive = false): Parameters<typeof drawGroup>[0] => ({
+  calls: kinds.map((kind, i) => ({
+    tool: 'mcp__plugin_via_step__step',
+    input: { kind, title: `x${i + 1}` },
+    isRunning: isActive && i === kinds.length - 1,
+    isErrored: false,
+    isInterrupted: false,
+  })),
+  isActive,
+  isExpanded: false,
+  isCallsOnly: true,
+})
+
+test('a folded run of harness calls is counted by what each did, in the order each kind first came', () => {
+  expect(texts(drawGroup(group(['read', 'read', 'search']))).join('')).toBe('Read 2 files, searched 1 pattern')
+  expect(texts(drawGroup(group(['execute', 'read', 'execute']))).join('')).toBe('Ran 2 commands, read 1 file')
+  expect(texts(drawGroup(group(['read'], true))).join('')).toBe('Reading 1 file… · x1')
+  // A kind ACP adds later, or none at all, still counts.
+  expect(texts(drawGroup(group(['think', undefined]))).join('')).toBe('2 other steps')
+})
+
+test('a folded run stays one line from its first call: the running title rides on it, failures and waits are words', () => {
+  const lines = (props: Parameters<typeof drawGroup>[0]) => (drawGroup(props) as { children: unknown[] }).children.length
+  const first = group(['execute'], true)
+  expect(texts(drawGroup(first)).join('')).toBe('Running 1 command… · x1')
+  const later = group(['execute', 'execute', 'execute'], true)
+  expect(texts(drawGroup(later)).join('')).toBe('Running 3 commands… · x3')
+  const done = { ...later, isActive: false, calls: later.calls.map((call) => ({ ...call, isRunning: false })) }
+  expect(texts(drawGroup(done)).join('')).toBe('Ran 3 commands')
+  const failed = { ...done, isCallsOnly: false, calls: done.calls.map((call, i) => ({ ...call, isErrored: i === 1 })) }
+  expect(texts(drawGroup(failed)).join('')).toBe('Ran 3 commands, 1 failed')
+  // A command still running after a step went by is not counted again.
+  expect(texts(drawGroup(group(['execute', 'wait', 'wait']))).join('')).toBe('Ran 1 command')
+  expect(texts(drawGroup(group(['wait']))).join('')).toBe('Waited on 1 command')
+  for (const props of [first, later, done, failed]) expect(lines(props)).toBe(1)
+})
+
+test('a failed call keeps its group on the via line instead of the engine count', async ($, on) => {
+  const seen: unknown[] = []
+  on('ui.render', (_, e) => {
+    seen.push(e)
+    return { type: 'Text', children: ['native'] }
+  })
+  const props = group(['execute', 'execute'])
+  const failed = { ...props, isCallsOnly: false, calls: props.calls.map((call, i) => ({ ...call, isErrored: i === 1 })) }
+  const drawn = await $.ui.render({ surface: 'terminal', component: 'ToolGroup', requestId: 'g', props: failed })
+  expect(texts(drawn).join('')).toBe('Ran 2 commands, 1 failed')
+  // Other rows than calls, with no failed call, keep the engine's own drawing.
+  await $.ui.render({ surface: 'terminal', component: 'ToolGroup', requestId: 'g', props: { ...props, isCallsOnly: false } })
+  expect(seen).toHaveLength(1)
 })
 
 test('a call answered while its command still runs gives way to its continuation row', () => {

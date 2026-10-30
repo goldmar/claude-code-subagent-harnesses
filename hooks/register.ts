@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import type { ViaChildren } from '../types'
-import { drawCall, drawRows } from './acp/render'
+import { drawCall, drawGroup } from './acp/render'
 import { answerCall, CHILD_CALL, endJob, waitStep } from './acp/steps'
 import type { Adapter } from './adapter'
 import { waitChild, woken } from './children'
@@ -330,14 +330,14 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'ToolUse' }, (_, e, next) => (e.props.tool === world.tool ? drawCall(e.props) : next(e)))
-  // Keep step rows in place: folding replaces them with a count as later calls arrive, which flickers.
-  // A failed or interrupted call also clears isCallsOnly; its group stays rows, not the engine's count.
-  // Only a group with other rows (hook timings, recalled memories) and no such call keeps the engine's.
+  // Claude Code decides which calls fold; via only counts them, and only a run of its own calls alone.
   on('ui.render', { component: 'ToolGroup' }, (_, e, next) => {
     const { calls, isCallsOnly, isExpanded } = e.props
     const ours = calls.length > 0 && calls.every((call) => call.tool === world.tool)
+    // A failed or interrupted call also clears isCallsOnly: its group keeps via's line, not the engine's.
+    // Only a group with other rows (hook timings, recalled memories) and no such call keeps the engine's.
     const plain = isCallsOnly === true || calls.some((call) => call.isErrored || call.isInterrupted)
-    return !isExpanded && ours && plain ? drawRows(e.props) : next(e)
+    return !isExpanded && ours && plain ? drawGroup(e.props) : next(e)
   })
   // The row shows the output already, all of it when expanded.
   on('ui.render', { component: 'ToolResult' }, (_, e, next) => (e.props.tool === world.tool ? { type: 'Box', children: [] } : next(e)))

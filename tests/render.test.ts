@@ -2,7 +2,7 @@ import type { RenderElement, RenderInput, RenderPropsOf } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 const TOOL = 'mcp__plugin_via_step__step'
-const call = (index: number): RenderPropsOf['ToolGroup']['calls'][number] & { tool_use_id: string } => ({
+const call = (index: number): RenderPropsOf['ToolGroup']['calls'][number] => ({
   tool_use_id: `toolu_step_t1_${index}`,
   tool: TOOL,
   input: { kind: 'execute', title: `echo ${index}` },
@@ -26,7 +26,7 @@ const texts = (node: unknown): string[] =>
       ? ((node as { children?: unknown[] }).children ?? []).flatMap(texts)
       : []
 
-test('nested command rows keep their exact title and output inside a drawn group', async ($, on) => {
+test('nested command titles stay on the summary and ctrl+o preserves their exact output', async ($, on) => {
   const title = "sed -n '120,180p' src/example/long_module_name_for_wrapping.py; sed…"
   const output = 'first check PASS, selected count 7\nsecond check PASS\nthird check PASS'
   const calls = Array.from({ length: 10 }, (_, index) => call(index + 1))
@@ -43,10 +43,16 @@ test('nested command rows keep their exact title and output inside a drawn group
       component: 'ToolGroup',
       requestId: 'nested-group',
       props: { calls, isActive: true, isExpanded: false, isCallsOnly: true },
-    })) as { children: { children: RenderElement[] }[] }
+    })) as RenderElement
     expect(seen).toHaveLength(0)
-    // The group draws each call's own row: keep the exact-output regression on that live path.
-    const row = drawn.children[9]?.children[0] as RenderElement
+    expect(textOf(drawn)).toBe(`Running 9 commands, reading 1 file… · ${title}`)
+    expect(drawn.children).toHaveLength(1)
+    const row = (await $.ui.render({
+      surface,
+      component: 'ToolUse',
+      requestId: 'nested-expanded',
+      props: { ...calls[9], isExpanded: true },
+    })) as RenderElement
     expect(row.type).toBe('Box')
     expect(row.props?.flexDirection).toBe('column')
     expect(row.children?.map(textOf)).toEqual([
@@ -58,7 +64,7 @@ test('nested command rows keep their exact title and output inside a drawn group
   }
 })
 
-test('step groups draw as rows as commands arrive, finish, and render again from history', async ($, on) => {
+test('step groups stay collapsed from their first command through completion and history', async ($, on) => {
   const seen: RenderInput[] = []
   on('ui.render', (_, e) => {
     seen.push(e)
@@ -74,12 +80,12 @@ test('step groups draw as rows as commands arrive, finish, and render again from
         })
         const props = { calls: current, isActive, isExpanded: false, isCallsOnly: true }
         const drawn = await $.ui.render({ surface, component: 'ToolGroup', requestId: `group-${surface}`, props })
-        const rows = (drawn as { children: { props: { key: string } }[] }).children
-        // One row per call, keyed by its id, in order; never the engine's counted line.
-        expect(rows.map((row) => row.props.key)).toEqual(current.map((c) => c.tool_use_id))
-        expect(texts(drawn).join('|')).toBe(
-          current.map((c, i) => (c.isRunning ? `Running| |echo ${i + 1}` : `Ran| |echo ${i + 1}|  ⎿  ${i + 1}`)).join('|'),
-        )
+        const line = drawn as { props: { key: string }; children: { props: { wrap: string } }[] }
+        expect(line.props.key).toBe('via-group')
+        expect(line.children).toHaveLength(1)
+        expect(line.children[0].props.wrap).toBe('truncate-end')
+        const label = `${isActive ? 'Running' : 'Ran'} ${count} ${count === 1 ? 'command' : 'commands'}`
+        expect(texts(drawn).join('')).toBe(`${label}${isActive ? `… · echo ${count}` : ''}`)
         expect(props.isExpanded).toBe(false)
       }
     }
@@ -87,14 +93,22 @@ test('step groups draw as rows as commands arrive, finish, and render again from
   expect(seen).toHaveLength(0)
 })
 
-test('a row in a drawn group folds its output as a standalone row does', async ($) => {
+test('a collapsed group hides output and ctrl+o delegates to native expanded rendering', async ($) => {
   const output = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join('\n')
   const props = { calls: [{ ...call(1), output }], isActive: false, isExpanded: false, isCallsOnly: true }
   const drawn = await $.ui.render({ surface: 'terminal', component: 'ToolGroup', requestId: 'long', props })
-  expect(texts(drawn).join('|')).toBe('Ran| |echo 1|  ⎿  line 1|     line 2|     line 3|     … 47 more lines (ctrl+o to expand)')
+  expect(texts(drawn).join('')).toBe('Ran 1 command')
+  const expanded = await $.ui.render({
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'expanded',
+    props: { ...call(1), output, isExpanded: true },
+  })
+  expect(texts(expanded).join('')).toContain('line 50')
+  expect(texts(expanded).join('')).not.toContain('more lines')
 })
 
-test('a failed or interrupted call keeps its group as rows instead of the engine count', async ($, on) => {
+test('already collapsed failed or interrupted groups keep the same summary line', async ($, on) => {
   const seen: RenderInput[] = []
   on('ui.render', (_, e) => {
     seen.push(e)
@@ -103,8 +117,8 @@ test('a failed or interrupted call keeps its group as rows instead of the engine
   for (const failed of [{ isErrored: true }, { isInterrupted: true }]) {
     const props = { calls: [call(1), { ...call(2), ...failed }], isActive: false, isExpanded: false, isCallsOnly: false }
     const drawn = await $.ui.render({ surface: 'terminal', component: 'ToolGroup', requestId: 'failed', props })
-    expect(texts(drawn)[0]).toBe('Ran')
-    expect(texts(drawn).join('')).toContain(failed.isErrored ? 'Failed echo 2' : 'Interrupted echo 2')
+    expect(texts(drawn).join('')).toBe('Ran 2 commands, 1 failed')
+    expect((drawn as { children: unknown[] }).children).toHaveLength(1)
   }
   expect(seen).toHaveLength(0)
 })
@@ -122,6 +136,15 @@ test('mixed groups, groups with other rows, empty groups, and expanded groups ke
     { ...base, calls: [] },
     { ...base, isCallsOnly: false },
     { ...base, isExpanded: true },
+    { ...base, isExpanded: true, isCallsOnly: false, calls: [{ ...call(1), isErrored: true }] },
+    {
+      ...base,
+      isCallsOnly: false,
+      calls: [
+        { ...call(1), isInterrupted: true },
+        { ...call(2), tool: 'Bash' },
+      ],
+    },
   ]
   for (const props of groups) {
     await $.ui.render({ surface: 'terminal', component: 'ToolGroup', requestId: 'ordinary', props })
@@ -130,4 +153,38 @@ test('mixed groups, groups with other rows, empty groups, and expanded groups ke
     expect(rendered.props).toEqual(props)
   }
   expect(seen.length).toBe(groups.length)
+})
+
+test('running continuations keep one command count and the latest title on the collapsed line', async ($) => {
+  const command = { ...call(1), output: 'The harness tool is still running' }
+  const wait = { ...call(2), input: { kind: 'wait', title: 'npm test\nstill running' }, isRunning: true }
+  for (const calls of [
+    [command, wait],
+    [command, { ...wait, isRunning: false }, wait],
+  ]) {
+    const drawn = await $.ui.render({
+      surface: 'terminal',
+      component: 'ToolGroup',
+      requestId: 'wait',
+      props: { calls, isActive: true, isExpanded: false, isCallsOnly: true },
+    })
+    expect(texts(drawn).join('')).toBe('Running 1 command… · npm test still running')
+    expect((drawn as { children: unknown[] }).children).toHaveLength(1)
+  }
+})
+
+test('mixed step kinds and multiple failures share one summary without output rows', async ($) => {
+  const calls = [
+    call(1),
+    { ...call(2), input: { kind: 'read', title: 'Read source' }, isErrored: true },
+    { ...call(3), isInterrupted: true },
+  ]
+  const drawn = await $.ui.render({
+    surface: 'desktop',
+    component: 'ToolGroup',
+    requestId: 'mixed-kinds',
+    props: { calls, isActive: false, isExpanded: false, isCallsOnly: false },
+  })
+  expect(texts(drawn).join('')).toBe('Ran 2 commands, read 1 file, 2 failed')
+  expect((drawn as { children: unknown[] }).children).toHaveLength(1)
 })
