@@ -6,7 +6,7 @@ import { childRun } from './children'
 import { deliver, handbackAsked, respond, textChunks } from './handback'
 import { cachedModels } from './models'
 import { helpOf, isModel, promptOf } from './prompt'
-import { answerOf, answerPath, attachChild, keepSpawn, type Receipt, remember, roster } from './recovery'
+import { answerOf, answerPath, attachChild, keepSpawn, type Receipt, remember, roster, runsRoot } from './recovery'
 import { cutOff, type RunResult, run } from './run'
 import { openInbox } from './steer'
 
@@ -192,7 +192,7 @@ async function* nestedStep(
   if (receipt) {
     const saved = await answerOf($, answerPath(receipt, nested.key))
     if (saved && !saved.aborted && saved.signed.trim()) nested.report = saved.signed
-    else if (kept?.nested) await attachChild(w, $, adapter, nested.key, kept.nested.parent, receipt)
+    else if (kept?.nested) await attachChild(w, $, adapter, nested.key, kept.nested.parent, receipt, signal)
   }
   // After its handback, or a later message: the answer again, as text.
   if (nested.report !== undefined) return yield* retained(w, $, adapter, e, agentId, nested.report)
@@ -491,11 +491,11 @@ async function* drive(w: World, $: EngineInterface, d: Drive): AsyncGenerator<Tu
   for (;;) {
     const session = (await $.state.get({ plugin: 'via', key: 'sessions', id: agentId })).value
     const inbox = adapter.steer ? await openInbox($, adapter.name, agentId, w.inboxes) : undefined
-    const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
-    const receipt: Receipt | undefined = home
+    const runs = await runsRoot($)
+    const receipt: Receipt | undefined = runs
       ? {
           turnId: e.turnId,
-          path: `${home}/.claude/via/runs/${encodeURIComponent(agentId)}/${encodeURIComponent(e.turnId)}/${block}`,
+          path: `${runs}/${encodeURIComponent(agentId)}/${encodeURIComponent(e.turnId)}/${block}`,
           scope: `${agentId}/${encodeURIComponent(e.turnId)}-${block}`,
           choice: chosen,
           mode,

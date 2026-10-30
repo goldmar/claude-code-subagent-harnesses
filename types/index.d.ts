@@ -5,7 +5,17 @@ export type Choice = {
   tier?: 'fast' | 'default'
 }
 // A queued child's next event, through the engine so the hook's own-time budget is paused.
-export type ViaChildren = { wait: (input: { key: string }) => Promise<void> }
+export type ViaChildren = {
+  wait: (input: { key: string }) => Promise<void>
+  // Starts reading a retained parent run's journal on the engine, once per run, and returns at once.
+  follow: (input: {
+    harness: string
+    type: string
+    parent: string
+    argv: string[]
+    receipt: { path: string; session?: string; scope?: string }
+  }) => Promise<void>
+}
 export type ViaSteps = { wait: (input: { agentId: string }) => Promise<void> }
 declare module 'claude-code' {
   interface EngineInterface {

@@ -57,6 +57,16 @@ function updateRoster(
   w.roster = written
   return written
 }
+// Where each run keeps its journal and answer: <root>/<agent>/<turn>/<block>.
+export async function runsRoot($: Pick<EngineInterface, 'env'>): Promise<string | undefined> {
+  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
+  return home ? `${home}/.claude/via/runs` : undefined
+}
+// Finished runs past a week, then the oldest past 1 GiB in all, go; a running one never does.
+export async function pruneRuns($: Pick<EngineInterface, 'env' | 'plugin' | 'process'>): Promise<void> {
+  const root = await runsRoot($)
+  if (root) await $.process.run(['node', helperOf($), 'prune', root], { timeoutMs: 30_000 })
+}
 export function helperOf($: Pick<EngineInterface, 'plugin'>): string {
   return `${$.plugin.root}/relay/src/durable.mts`
 }
@@ -92,6 +102,24 @@ export type Replay = {
   waiters: Map<string, (found: boolean) => void>
   done?: Promise<void>
 }
+// One replay per retained run, shared by the parent and every resumed child reading its journal.
+function replayOf(w: World, path: string): Replay {
+  w.replays ??= new Map()
+  let replay = w.replays.get(path)
+  if (!replay) {
+    replay = { at: 0, pending: [], waiters: new Map() }
+    w.replays.set(path, replay)
+  }
+  return replay
+}
+// A waiter whose child's channel now exists learns so.
+function settle(w: World, replay: Replay): void {
+  for (const [key, resolve] of replay.waiters)
+    if (w.channels.has(key)) {
+      replay.waiters.delete(key)
+      resolve(true)
+    }
+}
 export function journalChildren(
   w: World,
   path: string,
@@ -100,71 +128,103 @@ export function journalChildren(
   at: number,
   event: Extract<Norm, { k: 'child' | 'of' }>,
 ): Replay {
-  w.replays ??= new Map()
-  let replay = w.replays.get(path)
-  if (!replay) {
-    replay = { at: 0, pending: [], waiters: new Map() }
-    w.replays.set(path, replay)
-  }
+  const replay = replayOf(w, path)
   // The parent and a resumed child may follow the same journal. Only the first reader of each
   // child event routes it; spawn marks remain for the parent's reader whichever follower won.
   if (at > replay.at) {
     replay.pending.push(...route(w, parent, type, event))
     replay.at = at
-    for (const [key, resolve] of replay.waiters)
-      if (w.channels.has(key)) {
-        replay.waiters.delete(key)
-        resolve(true)
-      }
+    settle(w, replay)
   }
   return replay
 }
 // A resumed nested view can read the parent's journal even if the parent has no next step. The
 // follower never starts a harness; it only restores the channels this worker already produced.
-export async function attachChild(w: World, $: EngineInterface, adapter: Adapter, key: string, parent: string, receipt: Receipt) {
-  if (w.channels.has(key)) return
-  w.replays ??= new Map()
-  let replay = w.replays.get(receipt.path)
-  if (!replay) {
-    replay = { at: 0, pending: [], waiters: new Map() }
-    w.replays.set(receipt.path, replay)
+type Follower = ReturnType<EngineInterface['process']['spawn']>
+async function follow(
+  w: World,
+  start: () => Follower,
+  type: string,
+  adapter: Adapter,
+  parent: string,
+  receipt: Pick<Receipt, 'path' | 'session' | 'scope'>,
+  replay: Replay,
+) {
+  let buffer = ''
+  let at = 0
+  const parse = adapter.events(receipt.session)
+  let failure: string | undefined
+  try {
+    const stream = start()
+    for await (const piece of stream) {
+      if (piece.stream !== 'stdout') continue
+      buffer += piece.text
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines)
+        for (const event of parse(line))
+          if (event.k === 'child' || event.k === 'of') journalChildren(w, receipt.path, receipt.scope ?? parent, type, ++at, event)
+      settle(w, replay)
+    }
+    const exit = await stream.result
+    if (exit.code !== 0) failure = 'the retained harness run ended before this child answered'
+  } catch {
+    failure = 'could not read the retained harness run'
+  } finally {
+    closeChildren(w, receipt.scope ?? parent, failure)
+    for (const resolve of replay.waiters.values()) resolve(false)
+    replay.waiters.clear()
   }
-  if (!replay.done) {
-    const waiters = replay.waiters
-    const done = (async () => {
-      let buffer = ''
-      let at = 0
-      const parse = adapter.events(receipt.session)
-      let failure: string | undefined
-      try {
-        const stream = $.process.spawn({ argv: ['node', helperOf($), 'follow', receipt.path] })
-        for await (const piece of stream) {
-          if (piece.stream !== 'stdout') continue
-          buffer += piece.text
-          const lines = buffer.split('\n')
-          buffer = lines.pop() ?? ''
-          for (const line of lines)
-            for (const event of parse(line))
-              if (event.k === 'child' || event.k === 'of')
-                journalChildren(w, receipt.path, receipt.scope ?? parent, `${$.plugin.name}:${adapter.name}`, ++at, event)
-          for (const [waiting, resolve] of waiters)
-            if (w.channels.has(waiting)) {
-              waiters.delete(waiting)
-              resolve(true)
-            }
-        }
-        const exit = await stream.result
-        if (exit.code !== 0) failure = 'the retained harness run ended before this child answered'
-      } catch {
-        failure = 'could not read the retained harness run'
-      } finally {
-        closeChildren(w, receipt.scope ?? parent, failure)
-        for (const resolve of waiters.values()) resolve(false)
-        waiters.clear()
-      }
-    })()
-    replay.done = done
-  }
+}
+// Served as an engine noun: the follower runs on the engine's own interface, so no one child's stop
+// ends it for its siblings. Once per retained run.
+export function followRetained(
+  w: World,
+  start: () => Follower,
+  type: string,
+  adapter: Adapter,
+  parent: string,
+  receipt: Pick<Receipt, 'path' | 'session' | 'scope'>,
+): void {
+  const replay = replayOf(w, receipt.path)
+  replay.done ??= follow(w, start, type, adapter, parent, receipt, replay)
+}
+// Waits for the journal to name this child, in bounded engine waits: the caller's own-time budget
+// pauses through each, however long the parent's run takes to get there.
+export async function attachChild(
+  w: World,
+  $: Pick<EngineInterface, 'viaChildren' | 'plugin'>,
+  adapter: Adapter,
+  key: string,
+  parent: string,
+  receipt: Receipt,
+  signal?: AbortSignal,
+) {
   if (w.channels.has(key)) return
-  await Promise.race([new Promise<boolean>((resolve) => replay?.waiters.set(key, resolve)), replay.done])
+  const replay = replayOf(w, receipt.path)
+  await $.viaChildren.follow({
+    harness: adapter.name,
+    type: `${$.plugin.name}:${adapter.name}`,
+    parent,
+    argv: ['node', helperOf($), 'follow', receipt.path],
+    receipt: {
+      path: receipt.path,
+      ...(receipt.session ? { session: receipt.session } : {}),
+      ...(receipt.scope ? { scope: receipt.scope } : {}),
+    },
+  })
+  const done = replay.done
+  if (!done) return
+  w.arrivals ??= new Map()
+  let arrival = w.arrivals.get(key)
+  if (!arrival) {
+    arrival = Promise.race([new Promise<boolean>((resolve) => replay.waiters.set(key, resolve)), done.then(() => false)])
+    w.arrivals.set(key, arrival)
+    void arrival.then(() => w.arrivals?.delete(key))
+  }
+  let settled = false
+  void arrival.then(() => {
+    settled = true
+  })
+  while (!settled && !w.channels.has(key) && !signal?.aborted) await $.viaChildren.wait({ key })
 }

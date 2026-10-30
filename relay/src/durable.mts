@@ -10,8 +10,10 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -23,7 +25,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 type Request = { argv: string[]; cwd?: string; env?: Record<string, string>; input?: string; timeoutMs: number; maxBytes?: number }
 type Piece = { stream: 'stdout' | 'stderr'; text: string } | { code: number | null; signal: string | null }
 const [mode, directory] = process.argv.slice(2)
-if (!directory || !['start', 'work', 'follow', 'cancel'].includes(mode ?? ''))
+if (!directory || !['start', 'work', 'follow', 'cancel', 'prune'].includes(mode ?? ''))
   throw new Error('expected start, follow or cancel and a run directory')
 const dir = resolve(directory)
 const events = `${dir}/events.jsonl`
@@ -44,6 +46,82 @@ const write = (piece: Piece, terminal = false) => {
 const unavailable = () => {
   process.stderr.write('via: the retained run is not available; no task was resubmitted.\n')
   process.exit(200)
+}
+
+// Runs live under <root>/<agent>/<turn>/<block>. A finished one older than the age bound goes, then the
+// oldest finished ones until the rest fit the size bound. A running one never does: its owner is alive,
+// or its worker is still starting.
+const DAY_MS = 24 * 60 * 60 * 1000
+function prune(root: string, maxAgeMs: number, maxBytes: number): void {
+  const dirs = (path: string) => {
+    try {
+      return readdirSync(path, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => `${path}/${entry.name}`)
+    } catch {
+      return []
+    }
+  }
+  const measure = (path: string): { bytes: number; latest: number } => {
+    let bytes = 0
+    let latest = statSync(path).mtimeMs
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      const child = `${path}/${entry.name}`
+      if (entry.isDirectory()) {
+        const inner = measure(child)
+        bytes += inner.bytes
+        latest = Math.max(latest, inner.latest)
+      } else if (entry.isFile()) {
+        const stat = statSync(child)
+        bytes += stat.size
+        latest = Math.max(latest, stat.mtimeMs)
+      }
+    }
+    return { bytes, latest }
+  }
+  const running = (block: string): boolean => {
+    const owner = `${block}/owner.json`
+    if (existsSync(owner)) {
+      try {
+        const { pid, deadline } = JSON.parse(readFileSync(owner, 'utf8')) as { pid: number; deadline: number }
+        process.kill(pid, 0)
+        return Date.now() <= deadline + 10_000
+      } catch {
+        return false
+      }
+    }
+    const admission = `${block}/admission`
+    return existsSync(admission) && Date.now() - statSync(admission).mtimeMs < WORKER_START_MS
+  }
+  const blocks = dirs(root)
+    .flatMap(dirs)
+    .flatMap(dirs)
+    .flatMap((path) => {
+      try {
+        return running(path) ? [] : [{ path, ...measure(path) }]
+      } catch {
+        return []
+      }
+    })
+    .sort((a, b) => a.latest - b.latest)
+  let total = blocks.reduce((sum, block) => sum + block.bytes, 0)
+  const now = Date.now()
+  for (const block of blocks) {
+    if (now - block.latest <= maxAgeMs && total <= maxBytes) continue
+    rmSync(block.path, { recursive: true, force: true })
+    total -= block.bytes
+  }
+  // Turn and agent directories left empty go too.
+  for (const agent of dirs(root)) {
+    for (const turn of dirs(agent)) if (readdirSync(turn).length === 0) rmSync(turn, { recursive: true, force: true })
+    if (readdirSync(agent).length === 0) rmSync(agent, { recursive: true, force: true })
+  }
+}
+
+if (mode === 'prune') {
+  const [age, size] = process.argv.slice(4).map(Number)
+  prune(dir, age || 7 * DAY_MS, size || 1024 * 1024 * 1024)
+  process.exit(0)
 }
 
 if (mode === 'cancel') {

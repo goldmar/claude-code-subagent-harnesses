@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -178,5 +178,48 @@ test('a follower waits for a worker that is slow to start instead of calling the
     assert.equal(followed.stdout, 'late start\n')
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('pruning removes old and oversized finished runs, oldest first, and never a running one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'via-prune-'))
+  const day = 24 * 60 * 60 * 1000
+  const block = async (name, { ageDays, bytes = 10, owner = false, terminal = true }) => {
+    const path = join(root, 'agent', name, '0')
+    await mkdir(path, { recursive: true })
+    const events = join(path, 'events.jsonl')
+    await writeFile(
+      events,
+      `${JSON.stringify({ stream: 'stdout', text: 'x'.repeat(bytes) })}\n${terminal ? `${JSON.stringify({ code: 0, signal: null })}\n` : ''}`,
+    )
+    if (owner) await writeFile(join(path, 'owner.json'), JSON.stringify({ pid: process.pid, deadline: Date.now() + day }))
+    const when = new Date(Date.now() - ageDays * day)
+    for (const file of [events, ...(owner ? [join(path, 'owner.json')] : []), path]) await utimes(file, when, when)
+    return join(root, 'agent', name)
+  }
+  const exists = (path) =>
+    access(path).then(
+      () => true,
+      () => false,
+    )
+  try {
+    const old = await block('old', { ageDays: 8 })
+    const crashed = await block('crashed', { ageDays: 9, terminal: false })
+    const live = await block('live', { ageDays: 20, owner: true, terminal: false, bytes: 5000 })
+    const big = await block('big', { ageDays: 2, bytes: 3000 })
+    const recent = await block('recent', { ageDays: 1, bytes: 3000 })
+    // Seven days and 4000 bytes: the old ones by age, then the oldest finished one by size.
+    const result = await start('prune', root).result
+    assert.equal(result.code, 0, result.stderr)
+    const helperArgs = [helper, 'prune', root, String(7 * day), '4000']
+    const sized = await new Promise((resolve) => spawn(process.execPath, helperArgs).on('exit', resolve))
+    assert.equal(sized, 0)
+    assert.equal(await exists(old), false)
+    assert.equal(await exists(crashed), false)
+    assert.equal(await exists(big), false)
+    assert.equal(await exists(recent), true)
+    assert.equal(await exists(live), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })

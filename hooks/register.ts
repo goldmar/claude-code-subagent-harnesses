@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import type { ViaChildren } from '../types'
 import { drawCall, drawRows } from './acp/render'
 import { answerCall, CHILD_CALL, endJob, waitStep } from './acp/steps'
 import type { Adapter } from './adapter'
@@ -7,7 +8,7 @@ import { respond, textChunks } from './handback'
 import { HARNESSES } from './harnesses'
 import { cachedModels, refreshModels } from './models'
 import { descriptionOf, isModel, promptOf } from './prompt'
-import { helperOf, ROSTER_UNAVAILABLE, roster, spawnOf } from './recovery'
+import { followRetained, helperOf, pruneRuns, ROSTER_UNAVAILABLE, roster, spawnOf } from './recovery'
 import { notActivePrompt } from './run'
 import { sendMessage, steer, typed } from './steer'
 import { adapterOf, remember, turnStep } from './turn'
@@ -131,7 +132,13 @@ export const register: Register = (on, options) => {
     const built = await next(e)
     return {
       ...built,
-      viaChildren: { wait: ({ key }: { key: string }) => waitChild(world, key, (wake) => built.clock.after(5_000, wake)) },
+      viaChildren: {
+        wait: ({ key }: { key: string }) => waitChild(world, key, (wake) => built.clock.after(5_000, wake)),
+        follow: async ({ harness, type, parent, argv, receipt }: Parameters<ViaChildren['follow']>[0]) => {
+          const adapter = world.adapters.get(harness)
+          if (adapter) followRetained(world, () => built.process.spawn({ argv }), type, adapter, parent, receipt)
+        },
+      },
       viaSteps: { wait: ({ agentId }: { agentId: string }) => waitStep(world, agentId, (wake) => built.clock.after(5_000, wake)) },
     }
   })
@@ -142,6 +149,8 @@ export const register: Register = (on, options) => {
       .model()
       .then((main) => sizeWindow($, main))
       .catch(() => undefined)
+    // Retained runs are bounded on disk; pruning runs beside the session, never ahead of it.
+    void pruneRuns($).catch(() => undefined)
     // Each harness tool call reaches Claude Code as a call to this tool, served by mcp/step.mts, which
     // runs nothing: its tool.call hook answers with what the harness reported. Bash would look the same,
     // but a hook that fails is skipped and the real command would run; a call nobody answers fails.
@@ -345,8 +354,14 @@ export const register: Register = (on, options) => {
     }
   }).catch(async function* ($, e, next) {
     const adapter = e.agentId === undefined ? undefined : world.agents.get(e.agentId)
-    if (!adapter && next.error.message?.includes(ROSTER_UNAVAILABLE))
+    if (!adapter && next.error.message?.includes(ROSTER_UNAVAILABLE)) {
+      // Fail closed for anything that may be via's: a resumed via agent can list as general-purpose,
+      // but its step then names the harness's model. A listed non-via agent on a Claude model is Claude's.
+      const listed = e.agentId === undefined ? undefined : (await $.agent.list().catch(() => [])).find((a) => a.id === e.agentId)
+      const claude = listed !== undefined && !listed.type.startsWith(`${$.plugin.name}:`) && CLAUDE.test(e.model)
+      if (claude) return yield* next(e)
       return yield* respond(e, textChunks(ROSTER_UNAVAILABLE), ROSTER_UNAVAILABLE)
+    }
     if (!adapter) return yield* next(e)
     const original = stepErrors.get(e)
     stepErrors.delete(e)

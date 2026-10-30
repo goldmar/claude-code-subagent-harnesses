@@ -127,7 +127,9 @@ function codexOnPath(on: On, store: Map<string, unknown>, listing: { exitCode: n
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.model', () => ({ value: 'claude-haiku-5-5' }))
   const cwds: (string | undefined)[] = []
-  on('process.run', (_, e) => {
+  on('process.run', (_, e, next) => {
+    // The session's run pruning is not a model listing.
+    if (e.argv[2] === 'prune') return next(e)
     cwds.push(e.init?.cwd)
     return { value: { ...listing, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })

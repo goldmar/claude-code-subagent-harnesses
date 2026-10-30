@@ -27,6 +27,8 @@ export type Children = {
   // By `${via agent id}/${child session id}`, the child's current assignment, and by each assignment's key.
   channels: Map<string, Channel>
   nested: Map<string, { key: string; report?: string }> // by the nested agent's id
+  // By assignment key: a resumed nested agent waiting for its parent's journal to name its child.
+  arrivals?: Map<string, Promise<boolean>>
 }
 
 // Served as an engine noun: the caller's own-time budget pauses. Each call is bounded below
@@ -38,6 +40,16 @@ export async function waitChild(
   after: (wake: () => void) => ReturnType<EngineInterface['clock']['after']>,
 ): Promise<void> {
   const channel = w.channels.get(key)
+  const arriving = channel === undefined ? w.arrivals?.get(key) : undefined
+  if (arriving) {
+    let timer: ReturnType<EngineInterface['clock']['after']> | undefined
+    try {
+      await Promise.race([arriving, new Promise<void>((resolve) => (timer = after(resolve)))])
+    } finally {
+      timer?.cancel()
+    }
+    return
+  }
   if (!channel || channel.read || channel.queue.length > 0) return
   let wake: (() => void) | undefined
   let timer: ReturnType<EngineInterface['clock']['after']> | undefined
