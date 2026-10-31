@@ -80,8 +80,9 @@ test('step groups stay collapsed from their first command through completion and
         })
         const props = { calls: current, isActive, isExpanded: false, isCallsOnly: true }
         const drawn = await $.ui.render({ surface, component: 'ToolGroup', requestId: `group-${surface}`, props })
-        const line = drawn as { props: { key: string }; children: { props: { wrap: string } }[] }
+        const line = drawn as { props: { key: string; marginTop?: number }; children: { props: { wrap: string } }[] }
         expect(line.props.key).toBe('via-group')
+        expect(line.props.marginTop).toBe(1)
         expect(line.children).toHaveLength(1)
         expect(line.children[0].props.wrap).toBe('truncate-end')
         const label = `${isActive ? 'Running' : 'Ran'} ${count} ${count === 1 ? 'command' : 'commands'}`
@@ -105,6 +106,7 @@ test('a collapsed group hides output and ctrl+o delegates to native expanded ren
     props: { ...call(1), output, isExpanded: true },
   })
   expect(texts(expanded).join('')).toContain('line 50')
+  expect((expanded as { props?: { marginTop?: number } }).props?.marginTop).toBeUndefined()
   expect(texts(expanded).join('')).not.toContain('more lines')
 })
 

@@ -49,7 +49,7 @@ function titleOf(input: unknown): string {
 // ran 2 commands") in place of its "Called plugin:via:step 5 times". Styled as Claude Code's own: dim,
 // counts bold, undimmed under the pointer, since a click unfolds it. Always this one line, from the
 // first call on: the running call's title rides on it, so a call joining, ending or failing changes
-// words, never rows.
+// words, never rows. A blank line sets it apart from the agent's text above it, as the engine's own line is.
 export function drawGroup(props: RenderPropsOf['ToolGroup']): RenderElement {
   const kindOf = (call: (typeof props.calls)[number]) => (call.input as { kind?: unknown } | null)?.kind
   // A wait is a command still running after a step went by: counted with it, unless it is all there is.
@@ -72,7 +72,7 @@ export function drawGroup(props: RenderPropsOf['ToolGroup']): RenderElement {
   const title = current ? titleOf(current.input) : ''
   return {
     type: 'Box',
-    props: { key: 'via-group', paddingLeft: 2 },
+    props: { key: 'via-group', marginTop: 1, paddingLeft: 2 },
     children: [
       {
         type: 'Text',
