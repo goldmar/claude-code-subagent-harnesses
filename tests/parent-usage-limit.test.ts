@@ -1,11 +1,12 @@
 import { expect, mock, type TestBody, test } from 'claude-code/testing'
-import { NODE, run, STEP } from './helpers'
+import { agentStore, NODE, run, STEP } from './helpers'
 
 type On = Parameters<TestBody>[1]
 
 async function runningCodex($: Parameters<TestBody>[0], on: On) {
   const clock = mock.clock(on)
   mock.env(on, { HOME: '/home/u' })
+  const store = agentStore(on, { a1: { harness: 'codex' } })
   on('agent.list', () => ({ value: [{ id: 'a1', description: 'synthetic worker', type: 'via:codex', status: 'running' }] }))
   on('session.messages', () => ({ value: [] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
@@ -61,7 +62,7 @@ async function runningCodex($: Parameters<TestBody>[0], on: On) {
   const first = await run($, step)
   const tool = first.chunks.find((chunk) => chunk.kind === 'tool')
   expect(tool?.kind === 'tool' && tool.name).toBe('mcp__plugin_via_step__step')
-  return { clock, step, tool, release, requests: () => requests, closed: () => closed, fallback: () => fallback }
+  return { clock, store, step, tool, release, requests: () => requests, closed: () => closed, fallback: () => fallback }
 }
 
 for (const message of ['API Error: 429 Too Many Requests', "You've hit your limit"])
@@ -85,6 +86,39 @@ for (const message of ['API Error: 429 Too Many Requests', "You've hit your limi
     expect(worker.requests()).toBe(1)
     expect(worker.fallback()).toBe(0)
   })
+
+test('Codex saves its answer before the parent resumes, then replays it without a new run', async ($, on) => {
+  const worker = await runningCodex($, on)
+  const message = 'API Error: 429 Too Many Requests'
+  await $.classic.StopFailure({ error: 'rate_limit', error_details: message, last_assistant_message: message })
+  await $.turn.complete({ turnId: 'parent', reason: 'error', answer: message, durationMs: 1, isAborted: false })
+
+  // The background loop can keep taking its own steps while the main loop waits for the user.
+  worker.release()
+  const tool = worker.tool
+  expect(await $.tool.call({ tool: 'mcp__plugin_via_step__step', tool_use_id: tool?.kind === 'tool' ? tool.id : '' } as never)).toEqual({
+    result: 'WORK_DONE',
+  })
+  const finished = await run($, { ...worker.step, index: 1 })
+  const answer = 'CODEX_DONE\n\n— answered by codex, model not reported'
+  expect(finished.result.answer).toBe(answer)
+  expect(worker.store.record('a1')?.report).toBe(answer)
+  await $.turn.complete({ turnId: 'codex-work', agentId: 'a1', reason: 'answer', answer, durationMs: 1, isAborted: false })
+  await worker.clock.settle()
+  expect(worker.closed()).toBe(true)
+  expect(worker.requests()).toBe(1)
+  expect(worker.fallback()).toBe(0)
+
+  await $.turn.start({ turnId: 'parent-after-limit', text: 'continue after the limit' })
+  // A report step with no new worker task must use the saved answer, after the original job was removed.
+  const replayed = await run($, { ...worker.step, turnId: 'codex-report-after-limit', index: 0 })
+  expect(replayed.result.answer).toBe(answer)
+  expect(replayed.result.stopReason).toBe('end_turn')
+  expect(replayed.chunks.flatMap((chunk) => (chunk.kind === 'text' ? [chunk.text] : [])).join('')).toBe(answer)
+  expect(worker.store.record('a1')?.report).toBe(answer)
+  expect(worker.requests()).toBe(1)
+  expect(worker.fallback()).toBe(0)
+})
 
 test('ending the Codex turn itself stops its run; a later step reports cut-off instead of replaying it', async ($, on) => {
   const worker = await runningCodex($, on)
