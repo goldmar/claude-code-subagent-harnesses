@@ -19,7 +19,6 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk/unstable'
-import { sessionUpdates } from './session-updates.mjs'
 
 type Policy = 'allow' | 'deny' | 'ask'
 type Answer = (optionId: string | null) => void
@@ -166,10 +165,9 @@ const choose = (options: readonly acp.PermissionOption[], kind: acp.PermissionOp
   return { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } }
 }
 
-const stream = sessionUpdates(
-  acp.ndJsonStream(Writable.toWeb(agent.stdin) as WritableStream<Uint8Array>, Readable.toWeb(agent.stdout) as ReadableStream<Uint8Array>),
-  // Count only: an unrecognized payload or tag may carry private agent output.
-  (count) => out({ relay: 'ignored_session_update', count }),
+const stream = acp.ndJsonStream(
+  Writable.toWeb(agent.stdin) as WritableStream<Uint8Array>,
+  Readable.toWeb(agent.stdout) as ReadableStream<Uint8Array>,
 )
 const result = await acp
   .client({ name: 'via' })
