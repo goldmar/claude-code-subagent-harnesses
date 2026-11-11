@@ -1,5 +1,4 @@
 import type { EngineInterface, TurnStepChunk, TurnStepResult, TurnUsage } from 'claude-code'
-import type { Turn } from './world'
 
 export const HANDBACK_TOOL = 'SubagentHandback'
 
@@ -33,15 +32,14 @@ export async function handbackAsked($: Pick<EngineInterface, 'session'>, agentId
   return Array.isArray(rows) && rows.some((m) => m.role === 'user' && m.text.includes(HANDBACK_TOOL))
 }
 
+// The answer as a SubagentHandback call, which auto mode asks a local agent to end with.
 export async function* deliver(
   name: string,
   e: { turnId: string; index: number },
-  turn: Turn,
   block: number,
   report: string,
   usage: TurnUsage | null,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
-  turn.delivered = true
   const input = { message: report }
   const id = `toolu_${name}_${e.turnId.replace(/[^A-Za-z0-9_]/g, '_')}`
   return yield* respond(

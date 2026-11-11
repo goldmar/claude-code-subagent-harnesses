@@ -90,7 +90,7 @@ export function helpOf(adapter: HelpAdapter, models: readonly string[]): string 
     lines.push(`tools: read|write   read: ${name} runs read-only and cannot edit files. write, or no tools line: it can.`)
   else
     lines.push(
-      `tools: <list>       passed to ${name} as its tool list: read is read-only; any other list, such as -bash,read, can still edit and loads the project's .pi extensions.`,
+      `tools: <list>       passed to ${name} as its tool list: a list of only read, grep, find, ls is read-only; any other, such as -bash,read, can edit and loads the project's .pi extensions.`,
     )
   if (adapter.thinking.length > 0)
     lines.push(`thinking: <level>   passed to ${name} as its thinking level: ${adapter.thinking.join(', ')}.`)

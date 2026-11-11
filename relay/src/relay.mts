@@ -277,10 +277,11 @@ const result = await acp
       process.stderr.write(`acp relay: steer refused, queued: ${reason(error)}\n`)
       queue.push(text)
     }
-    // Codex steers go one at a time: a later one must not land in a turn an earlier one's fallback cancels.
-    let codexSteers: Promise<void> = Promise.resolve()
-    const steerCodex = (text: string) =>
-      (codexSteers = codexSteers.then(async () => {
+    // RELAY_STEER=steering: the _session/steering extension (codex-acp), which injects into the running turn.
+    // One at a time: a later one must not land in a turn an earlier one's fallback cancels.
+    let extensionSteers: Promise<void> = Promise.resolve()
+    const steerByExtension = (text: string) =>
+      (extensionSteers = extensionSteers.then(async () => {
         // The prompt ended, or is being interrupted, while this one waited.
         if (!busy || interrupt !== undefined) return void queue.push(text)
         const r = await ctx
@@ -288,13 +289,14 @@ const result = await acp
           .catch((error: unknown) => refused(text, error))
         if (r === undefined) return
         if (r.outcome === 'injected') return void out({ relay: 'steered' })
-        // No turn was left to steer, so codex-acp started one whose end this relay never hears:
+        // No turn was left to steer, so the agent started one whose end this relay never hears:
         // cancel it and run the message as an ordinary prompt.
         if (r.outcome === 'startedNewTurn') await ctx.notify(acp.methods.agent.session.cancel, { sessionId }).catch(() => {})
         queue.push(text)
       }))
-    // opencode takes a second prompt at its next step and answers it when all its work is done.
-    const steerOpencode = async (text: string) => {
+    // Otherwise a second prompt, which an agent such as opencode takes at its next step and answers when all
+    // its work is done.
+    const steerByPrompt = async (text: string) => {
       const r = await ctx.request(acp.methods.agent.session.prompt, prompted(text)).catch((error: unknown) => refused(text, error))
       // Cancelled by an interrupt before it was read: reported undelivered.
       if (r === undefined || r.stopReason === 'cancelled') return
@@ -306,7 +308,7 @@ const result = await acp
       }
     }
     const steer = (text: string) => {
-      const done: Promise<void> = (process.env.RELAY_STEER === 'steering' ? steerCodex(text) : steerOpencode(text)).finally(() =>
+      const done: Promise<void> = (process.env.RELAY_STEER === 'steering' ? steerByExtension(text) : steerByPrompt(text)).finally(() =>
         steering.delete(done),
       )
       steering.add(done)

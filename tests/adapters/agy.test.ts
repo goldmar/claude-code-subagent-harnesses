@@ -1,6 +1,7 @@
 import { expect, mock, type TestBody, test } from 'claude-code/testing'
 
-import { run, STEP } from '../helpers'
+import type { AgentRecord } from '../../hooks/record'
+import { agentStore, run, STEP } from '../helpers'
 
 type TestOn = Parameters<TestBody>[1]
 type Spawn = { argv: string[]; input: string | undefined }
@@ -55,11 +56,13 @@ const MODEL = JSON.stringify({ status: 'SUCCESS', command: { name: 'model', data
 function arrange(
   on: TestOn,
   spawns: Spawn[],
-  out: { stdout?: string; stderr?: string; code?: number } = { stdout: RUN },
+  // record: what the agent's record holds at the start, as an earlier turn or process left it.
+  out: { stdout?: string; stderr?: string; code?: number; record?: Partial<AgentRecord> } = { stdout: RUN },
   probes: string[][] = [],
   probe: { exitCode: number; stdout: string } | 'reject' = { exitCode: 0, stdout: MODEL },
 ) {
   mock.env(on, {})
+  const records = agentStore(on, { a1: { harness: 'agy', ...out.record } })
   on('agent.list', () => ({ value: [AGENT] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e, next) => next(e))
@@ -77,6 +80,7 @@ function arrange(
     if (out.stderr) yield { stream: 'stderr' as const, text: out.stderr }
     return { value: { code: out.code ?? 0, signal: null } }
   })
+  return records
 }
 
 const NEW = ['agy', '--output-format', 'stream-json', '--disable-slash-commands', '--sandbox']
@@ -165,15 +169,10 @@ test('a tool step shows once, only the last message is the answer, and usage kee
 
 test('the conversation id is saved, and a follow-up resumes it with --conversation', async ($, on) => {
   const spawns: Spawn[] = []
-  const saved: unknown[] = []
-  arrange(on, spawns)
-  on('state.set', (_, e, next) => {
-    if (e.key === 'sessions') saved.push(e.value)
-    return next(e)
-  })
+  const records = arrange(on, spawns)
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'say PONG7' })
   await run($)
-  expect(saved).toEqual([RUN_ID])
+  expect(records.record('a1')?.session).toBe(RUN_ID)
   await $.turn.start({ turnId: 't2', agentId: 'a1', text: 'and again' })
   await run($, { ...STEP, turnId: 't2', messageCount: 2 })
   expect(spawns[1]?.argv).toEqual([...NEW, '--conversation', RUN_ID])
@@ -181,8 +180,7 @@ test('the conversation id is saved, and a follow-up resumes it with --conversati
 
 test('a resumed conversation that comes back with the same id carries no notice', async ($, on) => {
   const spawns: Spawn[] = []
-  arrange(on, spawns, { stdout: RESUMED })
-  on('state.get', (_, e, next) => (e.key === 'sessions' ? { value: { value: RESUMED_ID, version: 1 } } : next(e)))
+  arrange(on, spawns, { stdout: RESUMED, record: { session: RESUMED_ID } })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'what did you say?' })
   const { result } = await run($)
   expect(spawns[0]?.argv.slice(-2)).toEqual(['--conversation', RESUMED_ID])
@@ -191,19 +189,13 @@ test('a resumed conversation that comes back with the same id carries no notice'
 
 test('a lost conversation is said with the answer, since agy silently starts a new one', async ($, on) => {
   const spawns: Spawn[] = []
-  const saved: unknown[] = []
-  arrange(on, spawns, { stdout: RUN, stderr: 'warning: conversation "gone" not found\n' })
-  on('state.get', (_, e, next) => (e.key === 'sessions' ? { value: { value: 'gone', version: 1 } } : next(e)))
-  on('state.set', (_, e, next) => {
-    if (e.key === 'sessions') saved.push(e.value)
-    return next(e)
-  })
+  const records = arrange(on, spawns, { stdout: RUN, stderr: 'warning: conversation "gone" not found\n', record: { session: 'gone' } })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'continue' })
   const { result } = await run($)
   expect(result.answer).toBe(
     "PONG7\n\nagy could not find this agent's earlier conversation, so this answer comes from a new one without that context.\n\n— answered by agy, gemini-3.8-flash-high",
   )
-  expect(saved).toEqual([RUN_ID])
+  expect(records.record('a1')?.session).toBe(RUN_ID)
 })
 
 test('a result other than SUCCESS is a failure in agy words, unsigned', async ($, on) => {
@@ -266,8 +258,7 @@ test('a resumed run whose init carries no id raises no lost-conversation notice'
   const noId = RESUMED.split('\n')
     .map((l) => (l.startsWith('{"event":"init"') ? '{"event":"init","init":{}}' : l))
     .join('\n')
-  arrange(on, [], { stdout: noId })
-  on('state.get', (_, e, next) => (e.key === 'sessions' ? { value: { value: RESUMED_ID, version: 1 } } : next(e)))
+  arrange(on, [], { stdout: noId, record: { session: RESUMED_ID } })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'what did you say?' })
   expect((await run($)).result.answer).toBe('zebra-41\n\n— answered by agy, gemini-3.8-flash-high')
 })
@@ -293,6 +284,7 @@ test('the model probe runs alongside the run, not before it', async ($, on) => {
     spawned = resolve
   })
   mock.env(on, {})
+  agentStore(on, { a1: { harness: 'agy' } })
   on('agent.list', () => ({ value: [AGENT] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e, next) => next(e))
@@ -315,8 +307,7 @@ test('the model probe runs alongside the run, not before it', async ($, on) => {
 
 test('plan mode refuses agy, which has no read-only mode via can enforce', async ($, on) => {
   const spawns: Spawn[] = []
-  arrange(on, spawns)
-  on('state.get', (_, e, next) => (e.key === 'modes' ? { value: { value: 'plan', version: 1 } } : next(e)))
+  arrange(on, spawns, { stdout: RUN, record: { mode: 'plan' } })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'look around' })
   const { result } = await run($)
   expect(spawns).toHaveLength(0)

@@ -1,6 +1,6 @@
 {
   "name": "via",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "A Claude Code subagent type whose model steps run another coding-agent harness CLI, so agents show in Claude Code's agent list, stream live and take follow-ups.",
   "author": {
     "name": "Sean Floyd"
@@ -23,7 +23,7 @@
     "codexAcp": {
       "type": "string",
       "title": "Codex ACP adapter",
-      "description": "pinned (default): the codex-acp version via ships with, its whole dependency tree locked and verified, installed once. latest: fetch the newest codex-acp with npx on every run, unpinned.",
+      "description": "pinned (default): the codex-acp version via ships with, its whole dependency tree locked and verified, installed once. latest: install the newest codex-acp once per Claude Code session, its dependencies unpinned.",
       "options": [
         "pinned",
         "latest"

@@ -3,10 +3,9 @@ import type { Choice } from '../types'
 import type { Adapter, Usage } from './adapter'
 import type { Inbox } from './steer'
 import { undeliveredNotice } from './steer'
+import { answeredBy, type StepWriter } from './writer'
 
 export type Totals = { -readonly [K in keyof Usage]: Usage[K] }
-type Push = (k: 'text' | 'thinking', text: string) => TurnStepChunk
-
 export type Finished = { signed: string; usage: TurnUsage | null; chunks: TurnStepChunk[] }
 
 export function finish(args: {
@@ -18,36 +17,36 @@ export function finish(args: {
   readonly report: string
   readonly answeredBy: string
   readonly failure: string
-  readonly restate: boolean // the answer was said before the run's last call, so not in the last step
   readonly steered: number
   readonly inbox: Inbox | undefined
   readonly total: Totals
-  readonly push: Push
+  readonly writer: StepWriter // the run's: an answer said before its last step-ending chunk is said again
 }): Finished {
   const name = args.adapter.name
   const chunks: TurnStepChunk[] = []
   let report = args.report
-  if (args.restate && !args.failure && report.trim()) chunks.push(args.push('text', report.trim()))
+  const say = (t: string) => chunks.push(args.writer.say(t))
+  if (!args.writer.spoke && !args.failure && report.trim()) say(report.trim())
   if (args.stopped === 'limit') {
     const partial = report.trim()
     const notice = `${name} ran past ${args.timeoutMinutes} minutes and was stopped.`
     report = partial ? `${partial}\n\n${notice}` : notice
-    chunks.push(args.push('text', partial ? `\n\n${notice}` : notice))
+    say(partial ? `\n\n${notice}` : notice)
   }
   if (args.failure) {
     report = args.failure
-    chunks.push(args.push('text', `\n${args.failure}`))
+    say(`\n${args.failure}`)
   }
   if (args.notices.length > 0 && !args.failure) {
     const said = args.notices.join('\n')
     report = `${report.trim()}\n\n${said}`
-    chunks.push(args.push('text', `\n\n${said}`))
+    say(`\n\n${said}`)
   }
   const undelivered = undeliveredNotice(args.inbox, args.steered, name)
   if (undelivered) {
     const partial = report.trim()
     report = partial ? `${partial}\n\n${undelivered}` : undelivered
-    chunks.push(args.push('text', `\n\n${undelivered}`))
+    say(`\n\n${undelivered}`)
   }
   const requested = !args.failure && !args.answeredBy ? args.adapter.model(args.choice) : undefined
   const named = args.failure ? '' : args.answeredBy || requested || ''
@@ -64,8 +63,8 @@ export function finish(args: {
   // A genuine answer is always signed; an unknown model is said, never guessed.
   const signedBy = args.stopped === undefined && !args.failure
   const by = named === '' ? 'model not reported' : requested === named ? `${named} (requested)` : named
-  const line = `\n\n— answered by ${name}, ${by}`
+  const line = `\n\n${answeredBy(name, by)}`
   const signed = signedBy ? `${answer}${line}` : answer
-  if (signedBy) chunks.push(args.push('text', line))
+  if (signedBy) say(line)
   return { signed, usage, chunks }
 }

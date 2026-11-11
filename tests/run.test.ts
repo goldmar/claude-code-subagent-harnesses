@@ -4,7 +4,24 @@ import { answerCall, CHILD_CALL, pump, waitStep } from '../hooks/acp/steps'
 import { pi } from '../hooks/adapters/pi'
 import { turnStep } from '../hooks/turn'
 import type { World } from '../hooks/world'
-import { arrange, bottom, ENV, expectPiSpawn, hang, lines, NODE, node, ROOT, run, runTurn, type Spawn, STEP, split } from './helpers'
+import {
+  agentStore,
+  arrange,
+  bottom,
+  ENV,
+  expectPiSpawn,
+  hang,
+  lines,
+  NODE,
+  node,
+  ROOT,
+  run,
+  runTurn,
+  type Spawn,
+  STEP,
+  split,
+  testWorld,
+} from './helpers'
 
 test('a pi run past the default 30 minutes is stopped with its partial answer, unsigned', async ($, on) => {
   const clock = mock.clock(on)
@@ -119,8 +136,9 @@ test('an invalid defaultModel setting answers without spawning pi', { options: {
 
 test('a choice stored before a reload still applies to a follow-up', async ($, on) => {
   const spawns: Spawn[] = []
-  arrange(on, spawns, split(lines))
-  on('state.get', () => ({ value: { value: { model: 'openrouter/kimi', tools: 'read', thinking: 'high' }, version: 1 } }))
+  const store = arrange(on, spawns, split(lines))
+
+  store.seed('a1', { harness: 'pi', choice: { model: 'openrouter/kimi', tools: 'read', thinking: 'high' } })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
   await run($)
   expectPiSpawn(spawns[0], ROOT, ['--model', 'openrouter/kimi', '--tools', 'read', '-na', '--thinking', 'high'])
@@ -210,15 +228,10 @@ async function spawnPi(
 }
 
 test('an auto-mode spawned agent hands back on its first step even without a session reminder', async ($, on) => {
-  const persisted: unknown[] = []
-  arrange(on, [], split(lines))
-  on('state.set', (_, e, next) => {
-    persisted.push({ key: e.key, id: e.id, value: e.value })
-    return next(e)
-  })
+  const store = arrange(on, [], split(lines))
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
   await spawnPi($, 'auto')
-  expect(persisted).toContainEqual({ key: 'handbacks', id: 'a1', value: true })
+  expect(store.record('a1')).toMatchObject({ harness: 'pi', handback: true, mode: 'auto' })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
   const { result } = await run($)
   expect(result.stopReason).toBe('tool_use')
@@ -248,9 +261,9 @@ test('a fork in auto mode answers in plain text', async ($, on) => {
 })
 
 test('a fresh world hands back from the persisted decision alone', async ($, on) => {
-  arrange(on, [], split(lines))
-  // Nothing in this world's map and no session reminder: only what a reload kept.
-  on('state.get', (_, e, next) => (e.key === 'handbacks' ? { value: { value: true, version: 1 } } : next(e)))
+  const store = arrange(on, [], split(lines))
+
+  store.seed('a1', { harness: 'pi', handback: true })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
   const { result } = await run($)
   expect(result.stopReason).toBe('tool_use')
@@ -279,18 +292,12 @@ test('a step with no turn after a handback repeats the report as text, never a s
 })
 
 test('a step with no turn hands back a saved report that was never delivered', async ($, on) => {
-  const sets: unknown[] = []
-  arrange(on, [], split(lines))
-  const kept: Record<string, unknown> = { handbacks: true, reports: 'the report', handedBack: false }
-  on('state.get', (_, e, next) => (e.key in kept ? { value: { value: kept[e.key], version: 1 } } : next(e)))
-  on('state.set', (_, e, next) => {
-    sets.push({ key: e.key, value: e.value })
-    if (e.key in kept) kept[e.key] = e.value
-    return next(e)
-  })
+  const store = arrange(on, [], split(lines))
+
+  store.seed('a1', { harness: 'pi', handback: true, report: 'the report', handedBack: false })
   const first = await run($, { ...STEP, turnId: 't2' })
   expect(first.result.toolUses[0]).toEqual({ name: 'SubagentHandback', input: { message: 'the report' } })
-  expect(sets).toContainEqual({ key: 'handedBack', value: true })
+  expect(store.record('a1')?.handedBack).toBe(true)
   const again = await run($, { ...STEP, turnId: 't3' })
   expect(again.result.answer).toBe('the report')
   expect(again.result.toolUses).toEqual([])
@@ -306,12 +313,7 @@ test('a step with no turn and no saved report says the run was cut off, not that
 })
 
 test('a spawn keeps its harness in the store, and parallel spawns keep each other', async ($, on) => {
-  const store = new Map<string, unknown>()
-  on('store.get', (_, e) => ({ value: store.get(e.key) }))
-  on('store.set', (_, e) => {
-    store.set(e.key, e.value)
-    return { value: undefined }
-  })
+  const store = agentStore(on)
   on('agent.spawn', (_, e) => ({ model: 'haiku', agentId: e.prompt === 'two' ? 'a2' : 'a1' }))
   const spawn = (prompt: string) =>
     $.agent.spawn({
@@ -325,7 +327,9 @@ test('a spawn keeps its harness in the store, and parallel spawns keep each othe
       fork: false,
     })
   await Promise.all([spawn('one'), spawn('two')])
-  expect(store.get('agents')).toEqual({ a1: { harness: 'pi', handback: false }, a2: { harness: 'pi', handback: false } })
+  expect(store.record('a1')).toMatchObject({ harness: 'pi', handback: false })
+  expect(store.record('a2')).toMatchObject({ harness: 'pi', handback: false })
+  expect([...(store.held.get('agent-ids') as string[])].sort()).toEqual(['a1', 'a2'])
 })
 
 // Seen 2026-10-28 after /background: the new process saw no spawn and resumed the agent as general-purpose.
@@ -333,7 +337,7 @@ test("a step from an agent the old process spawned is still via's, not passed to
   mock.env(on, ENV)
   node(on)
   on('agent.list', () => ({ value: [{ id: 'a1', description: 'x', type: 'general-purpose', status: 'running' }] }))
-  on('store.get', (_, e) => ({ value: e.key === 'agents' ? { a1: { harness: 'pi', handback: true } } : undefined }))
+  agentStore(on, { a1: { harness: 'pi', handback: true } })
   on('session.messages', () => ({ value: [] }))
   let passed = false
   // biome-ignore lint/correctness/useYield: a streaming hook must be an async generator, even one that answers at once
@@ -362,29 +366,10 @@ async function drain(stream: AsyncGenerator<TurnStepChunk, TurnStepResult>): Pro
 }
 
 function fakeWorld(): World {
-  const world: World = {
+  const world = testWorld({
     adapters: new Map([['pi', pi]]),
-    defaultModel: '',
-    codexAcp: 'pinned',
-    installs: new Map(),
-    timeoutMinutes: 30,
-    turns: new Map(),
-    seeds: new Map(),
-    handbacks: new Map(),
-    modes: new Map(),
-    agents: new Map([['a1', pi]]),
-    others: new Set(),
-    lost: new Set(),
-    inboxes: new Map(),
-    descriptions: new Map(),
-    activity: new Map(),
-    channels: new Map(),
-    nested: new Map(),
-    spawns: new Map(),
-    tool: 'mcp__plugin_via_step__step',
-    jobs: new Map(),
-    calls: new Map(),
-  }
+    records: new Map([['a1', { harness: 'pi', handback: false, mode: 'default' }]]),
+  })
   return world
 }
 
@@ -436,18 +421,18 @@ test('an aborted follow-up leaves no report for a step with no turn to repeat', 
   const next = { signal: stop.signal } as Parameters<typeof turnStep>[3]
   const e = { ...STEP, agentId: 'a1' }
 
-  world.turns.set('t1', { prompt: 'go', delivered: false })
+  world.turns.set('t1', { prompt: 'go' })
   const first = await drain(turnStep(world, $, { ...e, turnId: 't1' }, next))
   expect(first.result.answer).toContain('all done')
-  expect(state.get('reports:a1')).toBe(first.result.answer)
+  expect(world.records.get('a1')?.report).toBe(first.result.answer)
 
-  world.turns.set('t2', { prompt: 'go', delivered: false })
+  world.turns.set('t2', { prompt: 'go' })
   const pending = drain(turnStep(world, $, { ...e, turnId: 't2' }, next))
   await spawned
   stop.abort()
   const second = await pending
   expect(second.result.answer).toBe('')
-  expect(state.get('reports:a1')).toBe('')
+  expect(world.records.get('a1')?.report).toBe('')
 
   const third = await drain(turnStep(world, $, { ...e, turnId: 't3' }, next))
   expect(third.result.answer).toContain('was cut off before it answered')
@@ -456,24 +441,19 @@ test('an aborted follow-up leaves no report for a step with no turn to repeat', 
 
 test("a second turn's run clears the first turn's report before spawning", async ($, on) => {
   const order: string[] = []
-  bottom(on)
+  const store = bottom(on)
   on('session.messages', () => ({ value: [] }))
-  on('state.set', (_, e, next) => {
-    order.push(`set:${e.key}=${String(e.value)}`)
-    return next(e)
-  })
   on('process.spawn', async function* () {
-    order.push('spawn')
+    order.push(`spawn with report=${store.record('a1')?.report ?? 'none'}`)
     yield* split(lines)
     return { value: { code: 0, signal: null } }
   })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
   await run($)
-  expect(order.at(-2)).toContain('all done')
-  order.length = 0
+  expect(store.record('a1')?.report).toContain('all done')
   await $.turn.start({ turnId: 't2', agentId: 'a1', text: 'go' })
   await run($, { ...STEP, turnId: 't2' })
-  expect(order.slice(0, 3)).toEqual(['set:reports=', 'set:handedBack=false', 'spawn'])
+  expect(order).toEqual(['spawn with report=', 'spawn with report='])
 })
 
 test('an auto-mode teammate answers in plain text', async ($, on) => {
@@ -586,23 +566,14 @@ test('two usage events report only the last model call', async ($, on) => {
   })
 })
 
-test('a choice line is stored under via.agents', async ($, on) => {
+test("a choice line is kept in the agent's record", async ($, on) => {
   const spawns: Spawn[] = []
-  const refs: unknown[] = []
-  arrange(on, spawns, split(lines))
-  on('state.set', (_, e, next) => {
-    refs.push({ plugin: e.plugin, key: e.key, id: e.id })
-    return next(e)
-  })
+  const store = arrange(on, spawns, split(lines))
+
+  store.seed('a1', { harness: 'pi' })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'model: openrouter/kimi\ngo' })
   await run($)
-  expect(refs).toEqual([
-    { plugin: 'via', key: 'agents', id: 'a1' },
-    { plugin: 'via', key: 'reports', id: 'a1' },
-    { plugin: 'via', key: 'handedBack', id: 'a1' },
-    { plugin: 'via', key: 'reports', id: 'a1' },
-    { plugin: 'via', key: 'handedBack', id: 'a1' },
-  ])
+  expect(store.record('a1')?.choice).toEqual({ model: 'openrouter/kimi' })
 })
 
 test('a model line never signs for pi: a stream that names no model says so', async ($, on) => {
@@ -636,8 +607,9 @@ test('an agent that is not a via agent is looked up once, not on every step', as
 
 test('plan mode runs pi with only its reading tools, which also skips the project .pi extensions', async ($, on) => {
   const spawns: Spawn[] = []
-  arrange(on, spawns, split(lines))
-  on('state.get', (_, e, next) => (e.key === 'modes' ? { value: { value: 'plan', version: 1 } } : next(e)))
+  const store = arrange(on, spawns, split(lines))
+
+  store.seed('a1', { harness: 'pi', mode: 'plan' })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'look around' })
   await run($)
   expect(spawns[0]?.argv).toEqual(expect.arrayContaining(['--tools', 'read,grep,find,ls', '-na']))
@@ -645,8 +617,9 @@ test('plan mode runs pi with only its reading tools, which also skips the projec
 
 test('plan mode overrides a pi tools line that could write, so pi still gets only its reading tools', async ($, on) => {
   const spawns: Spawn[] = []
-  arrange(on, spawns, split(lines))
-  on('state.get', (_, e, next) => (e.key === 'modes' ? { value: { value: 'plan', version: 1 } } : next(e)))
+  const store = arrange(on, spawns, split(lines))
+
+  store.seed('a1', { harness: 'pi', mode: 'plan' })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'tools: bash,edit\nlook around' })
   await run($)
   expect(spawns[0]?.argv).toEqual(expect.arrayContaining(['--tools', 'read,grep,find,ls', '-na']))
@@ -688,8 +661,9 @@ test('an Esc that finds the run parked between steps ends the run, so its harnes
 
 test("a nested agent's end that wakes its via parent after the parent's run runs nothing and repeats the report", async ($, on) => {
   const spawns: Spawn[] = []
-  arrange(on, spawns, split(lines))
-  on('state.get', (_, e, next) => (e.key === 'reports' ? { value: { value: 'the report', version: 1 } } : next(e)))
+  const store = arrange(on, spawns, split(lines))
+
+  store.seed('a1', { harness: 'pi', report: 'the report' })
   const text = `<task-notification>\n<task-id>n1</task-id>\n<tool-use-id>${CHILD_CALL}t1_1</tool-use-id>\n<status>completed</status>\n</task-notification>`
   await $.turn.start({ turnId: 't2', agentId: 'a1', text })
   const { result } = await run($, { ...STEP, turnId: 't2' })
@@ -764,4 +738,41 @@ test("an answer said before the run's last call is said again in the last step",
   const lastCall = chunks.findLastIndex((c) => c.kind === 'tool')
   const after = chunks.slice(lastCall + 1).map((c) => (c.kind === 'text' ? c.text : ''))
   expect(after.join('')).toBe('I need access to rex.\n\n— answered by pi, openrouter/kimi')
+})
+
+// Found only through agent.list (spawned before via loaded, evicted, or a store that did not answer): its
+// spawn's mode is unknown, so it runs read-only, never with more than the person gave; nothing is stored
+// over the real record.
+test('an agent via has no record of runs read-only, and its made-up record is never stored', async ($, on) => {
+  const spawns: Spawn[] = []
+  mock.env(on, ENV)
+  node(on)
+  const store = agentStore(on)
+  on('agent.list', () => ({ value: [{ id: 'a1', description: 'x', type: 'via:pi', status: 'running' }] }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('session.messages', () => ({ value: [] }))
+  on('fs.write', () => ({ value: undefined }))
+  on('process.spawn', async function* (_, e) {
+    spawns.push({ argv: [...e.argv], input: e.input, env: e.env })
+    yield* split(lines)
+    return { value: { code: 0, signal: null } }
+  })
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'look around' })
+  const { result } = await run($)
+  expect(spawns[0]?.argv).toEqual(expect.arrayContaining(['--tools', 'read,grep,find,ls', '-na']))
+  expect(result.answer).toContain('all done')
+  expect(store.record('a1')).toBeUndefined()
+})
+
+test('a refusal for an agent via has no record of says why it runs read-only, not to leave plan mode', async ($, on) => {
+  mock.env(on, ENV)
+  node(on)
+  agentStore(on)
+  on('agent.list', () => ({ value: [{ id: 'a1', description: 'x', type: 'via:agy', status: 'running' }] }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('session.messages', () => ({ value: [] }))
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
+  const { result } = await run($)
+  expect(result.answer).toContain('via has no record of the permission mode this agent was spawned with')
+  expect(result.answer).not.toContain('plan mode')
 })

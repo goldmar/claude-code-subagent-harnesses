@@ -8,15 +8,4 @@ declare module 'claude-code' {
     viaSteps: { wait: (input: { agentId: string; turnId: string }) => Promise<void> }
     viaChildren: { wait: (input: { key: string }) => Promise<void> }
   }
-
-  interface PluginState {
-    via: {
-      agents: StateFamily<Choice>
-      sessions: StateFamily<string>
-      handbacks: StateFamily<boolean>
-      reports: StateFamily<string>
-      handedBack: StateFamily<boolean>
-      modes: StateFamily<string>
-    }
-  }
 }

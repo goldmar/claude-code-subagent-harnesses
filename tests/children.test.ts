@@ -96,7 +96,7 @@ test("a subagent's first event spawns its nested agent once, and its nested agen
   route(w, 'a1', 'via:codex', of('c', { k: 'called', id: 'x', output: 'steps.ts', failed: false }))
   route(w, 'a1', 'via:codex', of('c', { k: 'text', t: 'steps.ts' }))
   route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', state: 'idle' })
-  w.nested.set('n1', { key: 'a1/c#1' })
+  w.nested.set('n1', 'a1/c#1')
   const { out, result } = await drain(
     childRun(w, 'n1', 'codex', { turnId: 't1', index: 0 }, new AbortController().signal, false, () => new Promise(() => {})),
   )
@@ -133,7 +133,7 @@ test("a subagent with no announcement (codex-acp 2.3.0's own form) still gets a 
   ])
   // The parent's run ends before the nested agent's first step: its queue waits for it.
   closeChildren(w, 'a1')
-  w.nested.set('n1', { key: 'a1/c#1' })
+  w.nested.set('n1', 'a1/c#1')
   const { result } = await drain(
     childRun(w, 'n1', 'codex', { turnId: 't1', index: 0 }, new AbortController().signal, true, () => new Promise(() => {})),
   )
@@ -146,7 +146,7 @@ test("a subagent's own subagent is spawned by its nested agent, not the run's", 
   route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', title: 'outer' })
   expect(route(w, 'a1', 'via:codex', { k: 'child', id: 'g', parent: 'c', title: 'inner' })).toEqual([])
   route(w, 'a1', 'via:codex', { k: 'child', id: 'c', parent: 'root', state: 'idle' })
-  w.nested.set('n1', { key: 'a1/c#1' })
+  w.nested.set('n1', 'a1/c#1')
   const { out } = await drain(
     childRun(w, 'n1', 'codex', { turnId: 't1', index: 0 }, new AbortController().signal, false, () => new Promise(() => {})),
   )

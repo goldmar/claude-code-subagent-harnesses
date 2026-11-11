@@ -1,5 +1,5 @@
 import { expect, mock, type TestBody, test } from 'claude-code/testing'
-import { NODE, run, runTurn, STEP } from './helpers'
+import { agentStore, NODE, run, runTurn, STEP } from './helpers'
 
 type On = Parameters<TestBody>[1]
 
@@ -37,14 +37,17 @@ async function nestedChild(
   $: Parameters<TestBody>[0],
   on: On,
   failure?: string,
-  refused?: 'state',
+  refused?: 'transcript',
   auto?: boolean,
   afterText: unknown[] = [],
 ) {
   const clock = mock.clock(on)
   mock.env(on, { HOME: '/home/u' })
+  // The record the parent's spawn left.
+  const store = agentStore(on, { a1: { harness: 'codex' } })
   on('agent.list', () => ({ value: [{ id: 'a1', description: 'parent', type: 'via:codex', status: 'running' }] }))
-  on('session.messages', () => ({ value: [] }))
+  // A refused transcript read throws inside via's step: any throw there does the same.
+  on('session.messages', (_, e) => (refused === 'transcript' && e.agentId === 'n1' ? { deny: 'transcript unavailable' } : { value: [] }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('agent.spawn', (_, e) => ({ agentId: 'n1', model: e.model ?? 'codex' }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } }))
@@ -74,7 +77,6 @@ async function nestedChild(
     return { value: { code: 0, signal: null } }
   })
   const requests = fallback(on)
-  if (refused === 'state') on('state.get', { key: 'handbacks', id: 'n1' }, () => ({ deny: 'state unavailable' }))
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'List acp' })
   const parent = await run($)
   const tool = parent.chunks.find((c) => c.kind === 'tool')
@@ -92,7 +94,7 @@ async function nestedChild(
     ...(auto ? { permissionMode: 'auto' as const } : {}),
   })
   await $.turn.start({ turnId: 'nested', agentId: 'n1', text: 'List acp' })
-  return { clock, requests, finish: () => run($, { ...STEP, index: 1 }) }
+  return { clock, requests, store, finish: () => run($, { ...STEP, index: 1 }) }
 }
 
 test('a failed nested child keeps its partial text and ends with the failure, never a signature', async ($, on) => {
@@ -113,7 +115,7 @@ test('a failed nested child keeps its partial text and ends with the failure, ne
 })
 
 test("a nested step whose hook throws ends in via, never as a model request with the harness's model", async ($, on) => {
-  const child = await nestedChild($, on, undefined, 'state')
+  const child = await nestedChild($, on, undefined, 'transcript')
   const { result } = await run($, { ...STEP, turnId: 'nested', agentId: 'n1' })
   expect(result.answer).toBe('The codex subagent failed: via could not render its next step.')
   expect(result.stopReason).toBe('end_turn')
@@ -127,31 +129,20 @@ test('a step whose hook throws says why in the log, not only in the answer', asy
     logged.push(e.text)
     return { value: undefined }
   })
-  const child = await nestedChild($, on, undefined, 'state')
+  const child = await nestedChild($, on, undefined, 'transcript')
   await run($, { ...STEP, turnId: 'nested', agentId: 'n1' })
-  expect(logged.some((line) => line.includes("via's step for codex failed") && line.includes('state unavailable'))).toBe(true)
+  expect(logged.some((line) => line.includes("via's step for codex failed") && line.includes('transcript unavailable'))).toBe(true)
   expect(child.requests()).toBe(0)
 })
 
 test("a nested agent's spawn and answer are kept for a new process", async ($, on) => {
-  const store = new Map<string, unknown>()
-  on('store.get', (_, e) => ({ value: store.get(e.key) }))
-  on('store.set', (_, e) => {
-    store.set(e.key, e.value)
-    return { value: undefined }
-  })
-  const saved = new Map<string, unknown>()
-  on('state.set', (_, e, next) => {
-    saved.set(`${e.key}:${e.id}`, e.value)
-    return next(e)
-  })
   const child = await nestedChild($, on)
-  expect((store.get('agents') as Record<string, unknown>)?.n1).toEqual({ harness: 'codex', handback: false, nested: true })
+  expect(child.store.record('n1')).toMatchObject({ harness: 'codex', handback: false, nested: true })
   const pending = run($, { ...STEP, turnId: 'nested', agentId: 'n1', model: 'gpt-6-luna' })
   await child.clock.settle()
   await child.finish()
   const { result } = await pending
-  expect(saved.get('reports:n1')).toBe(result.answer)
+  expect(child.store.record('n1')?.report).toBe(result.answer)
 })
 
 // A new process (a session sent to the background) resumes a nested agent as general-purpose, with no
@@ -159,10 +150,15 @@ test("a nested agent's spawn and answer are kept for a new process", async ($, o
 function newProcess(on: On, report?: string, handback?: { handedBack: boolean }) {
   mock.env(on, { HOME: '/home/u' })
   on('agent.list', () => ({ value: [{ id: 'n1', description: 'List acp', type: 'general-purpose', status: 'running' }] }))
-  const kept = { n1: { harness: 'codex', handback: handback !== undefined, nested: true } }
-  on('store.get', (_, e) => ({ value: e.key === 'agents' ? kept : undefined }))
-  const state: Record<string, unknown> = { reports: report, handedBack: handback?.handedBack }
-  on('state.get', (_, e, next) => (state[e.key] !== undefined ? { value: { value: state[e.key], version: 1 } } : next(e)))
+  agentStore(on, {
+    n1: {
+      harness: 'codex',
+      nested: true,
+      handback: handback !== undefined,
+      ...(report ? { report } : {}),
+      handedBack: handback?.handedBack,
+    },
+  })
   let spawned = 0
   // biome-ignore lint/correctness/useYield: a streaming hook must be an async generator, even one that answers at once
   on('process.spawn', async function* () {
@@ -207,29 +203,19 @@ test('an auto-mode nested agent never handed back hands its saved answer back in
 })
 
 test('a nested agent whose step failed is saved as failed, not left to read as cut off', async ($, on) => {
-  const saved = new Map<string, unknown>()
-  on('state.set', (_, e, next) => {
-    saved.set(`${e.key}:${e.id}`, e.value)
-    return next(e)
-  })
-  await nestedChild($, on, undefined, 'state')
+  const child = await nestedChild($, on, undefined, 'transcript')
   await run($, { ...STEP, turnId: 'nested', agentId: 'n1' })
-  expect(saved.get('reports:n1')).toBe('The codex subagent failed: via could not render its next step.')
+  expect(child.store.record('n1')?.report).toBe('The codex subagent failed: via could not render its next step.')
 })
 
 test("an auto-mode nested agent's handback is marked done once it hands back, for a new process to see", async ($, on) => {
-  const saved = new Map<string, unknown>()
-  on('state.set', (_, e, next) => {
-    saved.set(`${e.key}:${e.id}`, e.value)
-    return next(e)
-  })
   const child = await nestedChild($, on, undefined, undefined, true)
   const pending = run($, { ...STEP, turnId: 'nested', agentId: 'n1', model: 'gpt-6-luna' })
   await child.clock.settle()
   await child.finish()
   const { result } = await pending
   expect(result.toolUses[0]?.name).toBe('SubagentHandback')
-  expect(saved.get('handedBack:n1')).toBe(true)
+  expect(child.store.record('n1')?.handedBack).toBe(true)
 })
 
 // The same as a top-level run: a child that answers and then makes one last call ends in a step of its own,

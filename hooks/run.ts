@@ -1,5 +1,6 @@
 import type { EngineInterface, Timer, TurnStepChunk, TurnUsage } from 'claude-code'
 import type { Choice } from '../types'
+import type { Norm } from './acp/norm'
 import type { Mark } from './acp/steps'
 import type { Adapter, Ask, Mode } from './adapter'
 import { closeChildren, route } from './children'
@@ -9,6 +10,7 @@ import { finish, type Totals } from './report'
 import type { Inbox } from './steer'
 import { answerAsk, closeInbox, undeliveredSteers } from './steer'
 import type { World } from './world'
+import { StepWriter } from './writer'
 
 const ANSI = /\u001b\[[0-9;]*m/g
 const MISSING_MODEL = /refused model|model.*not found|not found.*model|unknown model|invalid model|no such model|model.*does not exist/i
@@ -39,6 +41,122 @@ export type RunInput = {
 
 const PLAN_MARKS: Record<string, string> = { pending: '☐', in_progress: '◐', completed: '☑' }
 
+// What a run has heard so far, as the harness's events come in.
+type RunState = {
+  readonly writer: StepWriter
+  issued?: string // a session id the harness just issued, not yet saved
+  latest: string | undefined // the run's session: the one it resumed, or the one it issued
+  answeredBy: string
+  readonly notices: string[]
+  error: string
+  steered: number
+  touched: boolean // a tool line moved the panel row on
+  readonly compacting: Set<string>
+  compacted: boolean // a /compact prompt that compacted and said nothing has the compaction as its answer
+  readonly asks: Ask[]
+  readonly open: Set<string> // calls announced and not yet reported done
+  readonly last: Totals // the last model call's usage: Claude Code reads input + cache as the agent's context
+  plan: string
+  plans: number
+}
+type Context = { readonly w: World; readonly agentId: string; readonly adapter: Adapter; readonly type: string; readonly inbox?: Inbox }
+
+const usageOf = (s: RunState, adapter: Adapter): TurnUsage => ({
+  model: s.answeredBy || adapter.name,
+  input_tokens: s.last.input,
+  output_tokens: s.last.output,
+  cache_read_input_tokens: s.last.cacheRead,
+  cache_creation_input_tokens: s.last.cacheWrite,
+})
+
+// Calls announced and not reported done: an interrupt or the run's end closes them as failed, or their rows
+// would stay running and via's tool.call hook would wait on them.
+function closeOpen(s: RunState, why: string): Mark[] {
+  const marks = [...s.open].map((id): Mark => ({ kind: 'call-end', id, output: why, failed: true }))
+  s.open.clear()
+  return marks
+}
+
+// One event of the harness's, into the run's state and what it shows.
+function take(s: RunState, c: Context, event: Norm): (TurnStepChunk | Mark)[] {
+  switch (event.k) {
+    case 'message':
+      s.writer.message()
+      return []
+    case 'session':
+      s.issued = event.id
+      s.latest = event.id
+      return []
+    case 'model':
+      s.answeredBy = event.name
+      return []
+    case 'usage':
+      // The last model call, never the run's sum: cost accuracy is traded for a right context size.
+      Object.assign(s.last, event.usage)
+      s.error = ''
+      return []
+    case 'steered':
+      s.steered += 1
+      return []
+    case 'interrupted':
+      // The harness ran the interrupt itself: nothing for the core to rerun or call undelivered.
+      if (c.inbox) c.inbox.interrupt = undefined
+      return closeOpen(s, 'interrupted')
+    case 'ask':
+      s.asks.push(event.ask)
+      return []
+    case 'notice':
+      s.notices.push(event.t)
+      return []
+    case 'error':
+      s.error = event.message
+      return []
+    case 'text':
+      return [s.writer.text(event.t)]
+    case 'thinking':
+      return [s.writer.thinking(event.t)]
+    case 'call': {
+      s.open.add(event.id)
+      if (event.kind === 'compact') s.compacting.add(event.id)
+      const input = { kind: event.kind, title: event.title, ...(event.path ? { path: event.path } : {}) }
+      return [s.writer.call(event.id, input, usageOf(s, c.adapter))]
+    }
+    case 'plan': {
+      // A row of its own, opened and closed at once, as Claude Code's own to-do list is: only on a change.
+      const listed = event.entries.map((entry) => `${PLAN_MARKS[entry.status] ?? '☐'} ${entry.content}`).join('\n')
+      if (listed === s.plan) return []
+      s.plan = listed
+      s.plans += 1
+      const id = `plan-${s.plans}`
+      return [
+        s.writer.call(id, { kind: 'plan', title: 'Plan' }, usageOf(s, c.adapter)),
+        { kind: 'call-end', id, output: listed, failed: false },
+      ]
+    }
+    case 'called':
+      if (!s.open.delete(event.id)) return []
+      if (s.compacting.has(event.id) && !event.failed) s.compacted = true
+      return [{ kind: 'call-end', id: event.id, output: event.output, failed: event.failed }]
+    case 'child':
+    case 'of': {
+      // Only a spawn, a step of its own, ends the text block it falls in.
+      const marks = route(c.w, c.agentId, c.type, event)
+      if (marks.length > 0) s.writer.boundary()
+      return marks
+    }
+    case 'tool': {
+      const tools = (c.w.activity.get(c.agentId)?.tools ?? 0) + 1
+      c.w.activity.set(c.agentId, { step: stepOf(event.t), tools })
+      s.touched = true
+      return [s.writer.say(event.t)]
+    }
+    default: {
+      const unreachable: never = event
+      return unreachable
+    }
+  }
+}
+
 export async function* run(
   w: World,
   adapter: Adapter,
@@ -50,156 +168,31 @@ export async function* run(
     if (!home) return
     await $.fs.write(`${home}/.claude/via/rows/${agentId}.jsonl`, text).catch(() => {})
   }
-  const description = stepOf(w.descriptions.get(agentId) ?? '')
+  const description = stepOf(w.records.get(agentId)?.description ?? '')
   const named = description ? `${description} · ` : ''
   const request = adapter.start({ choice, prompt, session, agentId, root: $.plugin.root, inbox: inbox?.path, guard, mode, installed })
-  let issued: string | undefined
-  let latest = session
-  let index = block - 1
-  let kind: 'text' | 'thinking' | undefined
+  const s: RunState = {
+    writer: new StepWriter(block),
+    latest: session,
+    answeredBy: '',
+    notices: [],
+    error: '',
+    steered: 0,
+    touched: false,
+    compacting: new Set(),
+    compacted: false,
+    asks: [],
+    open: new Set(),
+    last: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+    plan: '',
+    plans: 0,
+  }
+  const c: Context = { w, agentId, adapter, type: `${$.plugin.name}:${adapter.name}`, ...(inbox ? { inbox } : {}) }
+  const parse = adapter.events(session)
+  const takeLine = (line: string) => parse(line).flatMap((event) => take(s, c, event))
   let buffer = ''
   let stderr = ''
-  let report = ''
-  // Text since the last call: Claude Code takes the last step's text as the answer, so an answer said
-  // before the run's last call is said again at the end (finish).
-  let spoke = false
-  let answeredBy = ''
-  const notices: string[] = []
-  const parse = adapter.events(session)
   let failure = ''
-  let error = ''
-  let steered = 0
-  let touched = false
-  // A /compact prompt that compacted and said nothing has the compaction as its answer.
-  const compacting = new Set<string>()
-  let compacted = false
-  const asks: Ask[] = []
-  // Calls announced and not yet reported done: an interrupt or the run's end closes them as failed,
-  // or their rows would stay running and via's tool.call hook would wait on them.
-  const open = new Set<string>()
-  const close = (why: string): Mark[] => {
-    const marks = [...open].map((id): Mark => ({ kind: 'call-end', id, output: why, failed: true }))
-    open.clear()
-    return marks
-  }
-  const last: Totals = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
-  const push = (k: 'text' | 'thinking', text: string): TurnStepChunk => {
-    if (k !== kind) {
-      kind = k
-      index += 1
-    }
-    return { kind: k, index, text }
-  }
-  let plan = ''
-  let plans = 0
-  const usageNow = (): TurnUsage => ({
-    model: answeredBy || adapter.name,
-    input_tokens: last.input,
-    output_tokens: last.output,
-    cache_read_input_tokens: last.cacheRead,
-    cache_creation_input_tokens: last.cacheWrite,
-  })
-  const take = (line: string): (TurnStepChunk | Mark)[] => {
-    const chunks: (TurnStepChunk | Mark)[] = []
-    for (const event of parse(line)) {
-      switch (event.k) {
-        case 'message':
-          report = ''
-          break
-        case 'session':
-          issued = event.id
-          latest = event.id
-          break
-        case 'model':
-          answeredBy = event.name
-          break
-        case 'usage':
-          // Claude Code reads input + cache as the agent's context: report the last model call, never
-          // the run's sum. Cost accuracy is traded away for that; the harness's own logs keep it.
-          last.input = event.usage.input
-          last.cacheRead = event.usage.cacheRead
-          last.cacheWrite = event.usage.cacheWrite
-          last.output = event.usage.output
-          error = ''
-          break
-        case 'steered':
-          steered += 1
-          break
-        case 'interrupted':
-          // The harness ran the interrupt itself: nothing for the core to rerun or call undelivered.
-          if (inbox) inbox.interrupt = undefined
-          chunks.push(...close('interrupted'))
-          break
-        case 'ask':
-          asks.push(event.ask)
-          break
-        case 'notice':
-          notices.push(event.t)
-          break
-        case 'error':
-          error = event.message
-          break
-        case 'text':
-          report += event.t
-          spoke = true
-          chunks.push(push('text', event.t))
-          break
-        case 'thinking':
-          chunks.push(push('thinking', event.t))
-          break
-        case 'call': {
-          kind = undefined
-          spoke = false
-          open.add(event.id)
-          if (event.kind === 'compact') compacting.add(event.id)
-          const input = { kind: event.kind, title: event.title, ...(event.path ? { path: event.path } : {}) }
-          chunks.push({ kind: 'call-start', id: event.id, input, usage: usageNow() })
-          break
-        }
-        case 'plan': {
-          // A row of its own, opened and closed at once, as Claude Code's own to-do list is: only on a change.
-          const listed = event.entries.map((entry) => `${PLAN_MARKS[entry.status] ?? '☐'} ${entry.content}`).join('\n')
-          if (listed === plan) break
-          plan = listed
-          kind = undefined
-          spoke = false
-          plans += 1
-          const id = `plan-${plans}`
-          chunks.push({ kind: 'call-start', id, input: { kind: 'plan', title: 'Plan' }, usage: usageNow() })
-          chunks.push({ kind: 'call-end', id, output: listed, failed: false })
-          break
-        }
-        case 'called':
-          if (!open.delete(event.id)) break
-          if (compacting.has(event.id) && !event.failed) compacted = true
-          chunks.push({ kind: 'call-end', id: event.id, output: event.output, failed: event.failed })
-          break
-        case 'child':
-        case 'of': {
-          // Only a spawn, a step of its own, ends the text block it falls in.
-          const marks = route(w, agentId, `${$.plugin.name}:${adapter.name}`, event)
-          if (marks.length > 0) {
-            kind = undefined
-            spoke = false
-          }
-          chunks.push(...marks)
-          break
-        }
-        case 'tool': {
-          chunks.push(push('text', event.t))
-          const tools = (w.activity.get(agentId)?.tools ?? 0) + 1
-          w.activity.set(agentId, { step: stepOf(event.t), tools })
-          touched = true
-          break
-        }
-        default: {
-          const unreachable: never = event
-          return unreachable
-        }
-      }
-    }
-    return chunks
-  }
   await row('')
   const child = $.process.spawn(request)
   const pieces = child[Symbol.asyncIterator]()
@@ -233,33 +226,40 @@ export async function* run(
       buffer += piece.text
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
-      for (const line of lines) yield* take(line)
+      for (const line of lines) yield* takeLine(line)
       // Asked without waiting: Esc, the time limit and an interrupt still reach the harness meanwhile.
-      while (asks.length > 0) void answerAsk($, w.inboxes, agentId, inbox, asks.shift() as Ask, adapter.name)
-      if (touched) {
-        touched = false
+      while (s.asks.length > 0) void answerAsk($, w.inboxes, agentId, inbox, s.asks.shift() as Ask, adapter.name)
+      if (s.touched) {
+        s.touched = false
         const activity = w.activity.get(agentId)
         if (activity !== undefined) {
           const content = `via:${adapter.name} · ${named}▸ ${activity.step} · ${activity.tools} ${activity.tools === 1 ? 'step' : 'steps'}`
           await row(`${JSON.stringify({ id: agentId, content })}\n`)
         }
       }
-      if (issued !== undefined) {
-        await save(issued)
-        issued = undefined
+      if (s.issued !== undefined) {
+        await save(s.issued)
+        s.issued = undefined
       }
     }
     if (stopped === undefined) {
-      yield* take(buffer)
-      if (issued !== undefined) await save(issued)
+      yield* takeLine(buffer)
+      if (s.issued !== undefined) await save(s.issued)
       const exit = await child.result
       const known = adapter.failure?.(exit, stderr)
       if (known?.sessionLost) await save('')
-      if (exit.code === 0 && !report.trim() && compacted && /^\/compact\b/.test(prompt.trim()) && known === undefined && !error)
-        report = 'Compacted the conversation.'
+      if (
+        exit.code === 0 &&
+        !s.writer.report.trim() &&
+        s.compacted &&
+        /^\/compact\b/.test(prompt.trim()) &&
+        known === undefined &&
+        !s.error
+      )
+        s.writer.report = 'Compacted the conversation.'
       if (known !== undefined) failure = known.message
-      else if (error) failure = `${adapter.name}'s model call failed: ${error}`
-      else if (exit.code !== 0 || !report.trim()) {
+      else if (s.error) failure = `${adapter.name}'s model call failed: ${s.error}`
+      else if (exit.code !== 0 || !s.writer.report.trim()) {
         const why = stderr.replace(ANSI, '').trim() || '(no stderr)'
         failure =
           exit.code !== 0
@@ -275,9 +275,9 @@ export async function* run(
       const near = refused && choice.model ? nearestModels(choice.model, models) : []
       if (near.length > 0) failure += `\nDid you mean ${near.join(', ')}?`
     } else {
-      const tail = take(buffer)
+      const tail = takeLine(buffer)
       if (stopped === 'limit') yield* tail
-      if (issued !== undefined) await save(issued)
+      if (s.issued !== undefined) await save(s.issued)
     }
   } catch (err) {
     failure = `${adapter.name} could not run (is it installed and on PATH?): ${String(err)}`
@@ -292,7 +292,8 @@ export async function* run(
     await row('')
     if (inbox) await closeInbox($, inbox, agentId, w.inboxes)
   }
-  yield* close(
+  yield* closeOpen(
+    s,
     stopped === 'limit'
       ? `stopped at the ${w.timeoutMinutes}-minute limit`
       : stopped === 'abort'
@@ -300,36 +301,35 @@ export async function* run(
         : 'the run ended before this call finished',
   )
 
-  if (stopped === 'abort') return { aborted: true, signed: '', usage: null, block: index }
+  if (stopped === 'abort') return { aborted: true, signed: '', usage: null, block: s.writer.index }
 
   // The abort's own failure is not the answer: the interrupt's message runs next, after the steers it cut off.
   // A run that finished before the abort, or hit the time limit, keeps its answer; the interrupt is undelivered.
   if (inbox?.interrupt !== undefined && failure && stopped === undefined) {
-    yield push('text', '\n▸ interrupted\n')
+    yield s.writer.say('\n▸ interrupted\n')
     return {
       aborted: false,
       signed: '',
       usage: null,
-      block: index + 1,
-      next: [...undeliveredSteers(inbox, steered), inbox.interrupt].join('\n\n'),
+      block: s.writer.index + 1,
+      next: [...undeliveredSteers(inbox, s.steered), inbox.interrupt].join('\n\n'),
     }
   }
-  if (!answeredBy && !failure) answeredBy = (await probe(latest)) ?? ''
+  if (!s.answeredBy && !failure) s.answeredBy = (await probe(s.latest)) ?? ''
   const done = finish({
     adapter,
     choice,
-    notices,
+    notices: s.notices,
     stopped,
     timeoutMinutes: w.timeoutMinutes,
-    report,
-    answeredBy,
+    report: s.writer.report,
+    answeredBy: s.answeredBy,
     failure,
-    restate: !spoke,
-    steered,
+    steered: s.steered,
     inbox,
-    total: last,
-    push,
+    total: s.last,
+    writer: s.writer,
   })
   yield* done.chunks
-  return { aborted: false, signed: done.signed, usage: done.usage, block: index + 1 }
+  return { aborted: false, signed: done.signed, usage: done.usage, block: s.writer.index + 1 }
 }

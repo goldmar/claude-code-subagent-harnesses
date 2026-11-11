@@ -7,9 +7,10 @@ import { respond, textChunks } from './handback'
 import { HARNESSES } from './harnesses'
 import { cachedModels, refreshModels } from './models'
 import { descriptionOf, isModel, promptOf } from './prompt'
+import { createRecord, recordOf, updateRecord } from './record'
 import { notActivePrompt } from './run'
 import { sendMessage, steer, typed } from './steer'
-import { adapterOf, remember, saveNested, turnStep } from './turn'
+import { adapterOf, turnStep } from './turn'
 import type { World } from './world'
 
 // Only harnesses installed at session start get an agent type: each description rides on every request.
@@ -102,23 +103,27 @@ function choiceOf(world: World, adapter: Adapter, prompt: string): { model?: str
   return { model: asked.model ?? fallback, thinking: asked.thinking }
 }
 
+// Auto mode asks a local agent to end with a SubagentHandback; the engine's reminder is not in
+// session.messages, so the spawn's terms are kept. A remote spawn has no field here (isolation is on
+// AgentSpec, not AgentSpawnInput), and background cannot tell it from any other background spawn.
+function handsBack(e: { permissionMode?: string; isTeammate?: boolean; workflow?: unknown; fork?: boolean }): boolean {
+  return e.permissionMode === 'auto' && !e.isTeammate && e.workflow === undefined && !e.fork
+}
+
 export const register: Register = (on, options) => {
   const asked = options.timeoutMinutes
   const world: World = {
     adapters: new Map<string, Adapter>(HARNESSES.map((adapter) => [adapter.name, adapter])),
     defaultModel: typeof options.defaultModel === 'string' ? options.defaultModel.trim() : '',
-    codexAcp: options.codexAcp === 'latest' ? 'latest' : 'pinned',
+    // The codexAcp setting: codex-acp's newest, rather than the version via pins.
+    latest: new Set(options.codexAcp === 'latest' ? ['codex'] : []),
     timeoutMinutes: typeof asked === 'number' && Number.isFinite(asked) && asked > 0 ? asked : 30,
     turns: new Map(),
     seeds: new Map(),
-    handbacks: new Map(),
+    records: new Map(),
     installs: new Map(),
-    modes: new Map(),
-    agents: new Map(),
     others: new Set(),
-    lost: new Set(),
     inboxes: new Map(),
-    descriptions: new Map(),
     activity: new Map(),
     channels: new Map(),
     nested: new Map(),
@@ -173,7 +178,7 @@ export const register: Register = (on, options) => {
   // plugin, still stands.
   on('tool.check', { tool: 'Agent' }, async (_, e, next) => {
     const verdict = await next(e)
-    const own = e.agentId !== undefined && world.agents.has(e.agentId) && e.tool_use_id?.startsWith(CHILD_CALL)
+    const own = e.agentId !== undefined && world.records.has(e.agentId) && e.tool_use_id?.startsWith(CHILD_CALL)
     const modes = verdict.decision === 'ask' && !verdict.rule && !verdict.hook && !verdict.setting && !verdict.plugin
     return own && modes ? { decision: 'allow', reason: "via's own call for its harness's subagent" } : verdict
   })
@@ -210,12 +215,14 @@ export const register: Register = (on, options) => {
       const model = world.channels.get(key)?.model
       const started = await next({ ...e, model: model ?? adapter.name, ...(model ? { description: `${e.description} · ${model}` } : {}) })
       if (started.agentId) {
-        world.agents.set(started.agentId, adapter)
-        world.nested.set(started.agentId, { key })
-        world.handbacks.set(started.agentId, e.permissionMode === 'auto')
-        // Persisted: a new process (a session sent to the background) resumes it as general-purpose, and
-        // without this its step would go to Claude under the harness's model name.
-        await remember(world, $, started.agentId, { harness: adapter.name, handback: e.permissionMode === 'auto', nested: true })
+        world.nested.set(started.agentId, key)
+        await createRecord(world, $, started.agentId, {
+          harness: adapter.name,
+          nested: true,
+          handback: handsBack(e),
+          mode: e.permissionMode ?? 'default',
+          description: e.description,
+        })
       }
       return started
     }
@@ -230,23 +237,16 @@ export const register: Register = (on, options) => {
         : e,
     )
     if (started.agentId && adapter) {
-      // agent.list may lag the first step, so learn the harness at the spawn.
-      world.agents.set(started.agentId, adapter)
       world.seeds.set(started.agentId, e.prompt)
-      world.descriptions.set(started.agentId, e.description)
-      // What the person allows Claude itself; a harness maps it to its own modes. In memory before any
-      // await, so a first step that runs before the state writes still sees it.
-      world.modes.set(started.agentId, e.permissionMode ?? 'default')
-      // The engine's handback reminder is not in session.messages, so remember the spawn's terms.
-      // A remote spawn has no field here (isolation is on AgentSpec, not AgentSpawnInput), and
-      // background cannot tell it from any other background spawn.
-      const local = !e.isTeammate && e.workflow === undefined && !e.fork
-      const handback = e.permissionMode === 'auto' && local
-      // Persisted: a reload loses this map but must not lose the decision.
-      world.handbacks.set(started.agentId, handback)
-      await remember(world, $, started.agentId, { harness: adapter.name, handback })
-      await $.state.set({ plugin: 'via', key: 'handbacks', id: started.agentId }, handback)
-      await $.state.set({ plugin: 'via', key: 'modes', id: started.agentId }, e.permissionMode ?? 'default')
+      // agent.list may lag the first step, so the harness is learned at the spawn. mode: what the person
+      // allows Claude itself, which a harness maps to its own modes.
+      // A resume, or a teammate brought back, is the same agent: its session, choice and answer stay, and only
+      // the spawn's terms are new.
+      const terms = { harness: adapter.name, handback: handsBack(e), mode: e.permissionMode ?? 'default' }
+      const kept = await recordOf(world, $, started.agentId)
+      if (kept !== undefined && !kept.rebuilt)
+        await updateRecord(world, $, started.agentId, { ...terms, description: e.description || kept.description })
+      else await createRecord(world, $, started.agentId, { ...terms, description: e.description })
     }
     return started
   })
@@ -255,12 +255,12 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) {
       const rest = woken(e.text, world.nested)
       if (rest === '') {
-        world.turns.set(e.turnId, { prompt: '', delivered: false, wake: true })
+        world.turns.set(e.turnId, { prompt: '', wake: true })
         return next(e)
       }
       const prompt = unwrapped(rest ?? e.text) || world.seeds.get(e.agentId)
       world.seeds.delete(e.agentId)
-      if (prompt) world.turns.set(e.turnId, { prompt, delivered: false })
+      if (prompt) world.turns.set(e.turnId, { prompt })
     }
     return next(e)
   })
@@ -313,20 +313,18 @@ export const register: Register = (on, options) => {
   }).catch(async function* ($, e, next) {
     // A via step that throws would otherwise be skipped, and the request would go to the model with the
     // harness's model id. End the via turn with an explicit failure instead.
-    // world.agents: turnStep's adapterOf filled it before anything that can throw.
+    // From memory: turnStep's adapterOf loaded the record before anything that can throw.
     const agentId = e.agentId
-    const adapter = agentId === undefined ? undefined : world.agents.get(agentId)
-    if (agentId === undefined || !adapter) return yield* next(e)
+    const record = agentId === undefined ? undefined : world.records.get(agentId)
+    const adapter = record === undefined ? undefined : world.adapters.get(record.harness)
+    if (agentId === undefined || !record || !adapter) return yield* next(e)
     const why = next.error.message ? `${next.error.kind}: ${next.error.message}` : next.error.kind
     $.ui.log(`via's step for ${adapter.name} failed (${why})`)
     endJob(world, agentId)
-    const nested = world.nested.get(agentId)
-    const report = `The ${adapter.name}${nested ? ' subagent' : ''} failed: via could not render its next step.`
-    if (nested) {
-      nested.report = report
-      // Saved, or a new process says the run was cut off, not that it failed.
-      await saveNested(world, $, agentId, report)
-    }
+    const report = `The ${adapter.name}${record.nested ? ' subagent' : ''} failed: via could not render its next step.`
+    // A nested agent's later steps, here or in a new process, answer this rather than the cut-off; an answer it
+    // already has is kept.
+    if (record.nested && !record.report) await updateRecord(world, $, agentId, { report })
     return yield* respond(e, textChunks(report), report)
   })
 }

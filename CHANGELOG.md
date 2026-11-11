@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.9.0](https://github.com/SeanLF/claude-code-subagent-harnesses/compare/via-v0.8.1...via-v0.9.0) (2026-11-11)
+
+
+### Bug Fixes
+
+* keep quiet nested agents in via ([#24](https://github.com/SeanLF/claude-code-subagent-harnesses/issues/24)) ([2ad040c](https://github.com/SeanLF/claude-code-subagent-harnesses/commit/2ad040cfe2a47184355a5ae890701dd86b39632c))
+* **via:** a nested agent in a new process answers its saved report or the cut-off, never the model ([#46](https://github.com/SeanLF/claude-code-subagent-harnesses/issues/46)) ([26f00a7](https://github.com/SeanLF/claude-code-subagent-harnesses/commit/26f00a740fb99bf9bd0802fb37d2a184a81a278e))
+* **via:** an answer said before the run's last call is said again at the end ([#48](https://github.com/SeanLF/claude-code-subagent-harnesses/issues/48)) ([3974216](https://github.com/SeanLF/claude-code-subagent-harnesses/commit/39742165ff8a974349c7921c708218b8a147eeec))
+
+
+### Code Refactoring
+
+* **via:** one stored record per agent, one replay path, one step writer ([#49](https://github.com/SeanLF/claude-code-subagent-harnesses/issues/49)) ([d40e327](https://github.com/SeanLF/claude-code-subagent-harnesses/commit/d40e327836668f7800a6d563a9ef29407de68500))
+
 ## [0.8.1](https://github.com/SeanLF/claude-code-subagent-harnesses/compare/via-v0.8.0...via-v0.8.1) (2026-11-02)
 
 

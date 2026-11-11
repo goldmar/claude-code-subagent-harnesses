@@ -2,8 +2,7 @@ import { expect, mock, type TestBody, test } from 'claude-code/testing'
 import { relayEvents } from '../../hooks/acp/events'
 import { opencode, opencodeRun } from '../../hooks/adapters/opencode'
 import { run as runHook } from '../../hooks/run'
-import type { World } from '../../hooks/world'
-import { ROOT, run, runTurn, STEP } from '../helpers'
+import { agentStore, ROOT, run, runTurn, STEP, testWorld } from '../helpers'
 
 type TestOn = Parameters<TestBody>[1]
 type Spawn = { argv: string[]; input: string | undefined; env?: Record<string, string> }
@@ -61,7 +60,7 @@ function arrange(
   on('turn.complete', (_, e, next) => next(e))
   on('session.messages', () => ({ value: [] }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '24.11.0\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
-  on('state.get', (_, e, next) => (e.key === 'modes' && o.mode ? { value: { value: o.mode, version: 1 } } : next(e)))
+  const records = agentStore(on, { a1: { harness: 'opencode', mode: o.mode ?? 'default' } })
   on('fs.write', (_, e) => {
     o.writes?.push({ path: e.path, text: e.text })
     return { value: undefined }
@@ -72,6 +71,7 @@ function arrange(
     if (out.stderr) yield { stream: 'stderr' as const, text: out.stderr }
     return { value: { code: out.code ?? 0, signal: null } }
   })
+  return records
 }
 
 const injected = (spawn: Spawn | undefined) =>
@@ -164,47 +164,20 @@ test("a thinking line becomes opencode's effort config option", async ($, on) =>
 
 test('a lost session fails in plain words and is forgotten', async ($, on) => {
   const spawns: Spawn[] = []
-  const saved: unknown[] = []
-  arrange(on, spawns, {
+  const records = arrange(on, spawns, {
     stdout: lines([{ relay: 'session_lost', message: 'Session not found' }]),
     stderr: 'acp relay: session lost: Session not found\n',
     code: 1,
   })
-  on('state.set', (_, e, next) => {
-    if (e.key === 'sessions') saved.push(e.value)
-    return next(e)
-  })
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
   const { result } = await runTurn($)
   expect(result.answer).toContain("opencode could not find this agent's earlier session")
-  expect(saved).toEqual([''])
+  expect(records.record('a1')?.session).toBe('')
 })
 
 test('an aborted run saves a session id in an unterminated tail without showing its text', async () => {
   const saved: unknown[] = []
-  const world: World = {
-    adapters: new Map([['opencode', opencode]]),
-    defaultModel: '',
-    codexAcp: 'pinned',
-    installs: new Map(),
-    timeoutMinutes: 30,
-    turns: new Map(),
-    seeds: new Map(),
-    handbacks: new Map(),
-    modes: new Map(),
-    agents: new Map(),
-    others: new Set(),
-    lost: new Set(),
-    inboxes: new Map(),
-    descriptions: new Map(),
-    activity: new Map(),
-    channels: new Map(),
-    nested: new Map(),
-    spawns: new Map(),
-    tool: 'mcp__plugin_via_step__step',
-    jobs: new Map(),
-    calls: new Map(),
-  }
+  const world = testWorld({ adapters: new Map([['opencode', opencode]]) })
   const stop = new AbortController()
   let read!: () => void
   const readPiece = new Promise<void>((resolve) => {

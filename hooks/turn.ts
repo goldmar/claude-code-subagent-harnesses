@@ -3,75 +3,48 @@ import type { Choice } from '../types'
 import { endJob, type Job, type Mark, pump } from './acp/steps'
 import type { Adapter, Mode } from './adapter'
 import { childRun } from './children'
-import { deliver, handbackAsked, respond, textChunks } from './handback'
+import { deliver, HANDBACK_TOOL, handbackAsked, respond, textChunks } from './handback'
+import { relayReady } from './install'
 import { cachedModels } from './models'
 import { helpOf, isModel, promptOf } from './prompt'
+import { type AgentRecord, recordOf, updateRecord } from './record'
 import { cutOff, type RunResult, run } from './run'
 import { openInbox } from './steer'
-import type { World } from './world'
+import type { Turn, World } from './world'
 
 type StepHook = StreamHook<'turn.step'>
+type Engine = Parameters<StepHook>[0]
+type Step = Parameters<StepHook>[1]
 
-// Each via agent's harness and handback, kept across processes in $.store: a session sent to the
-// background continues in a new process, with none of the spawn's state. The newest ROSTER_KEPT.
-const ROSTER = 'agents'
-const ROSTER_KEPT = 200
-// nested: a harness's own subagent, which only its parent's run can answer; a new process has no such run.
-type Kept = { harness: string; handback: boolean; nested?: true }
-async function roster($: Pick<EngineInterface, 'store'>): Promise<Record<string, Kept>> {
-  const stored = await $.store.get(ROSTER).catch(() => undefined)
-  if (typeof stored !== 'object' || stored === null) return {}
-  return Object.fromEntries(
-    Object.entries(stored as Record<string, unknown>).filter(
-      (entry): entry is [string, Kept] => typeof (entry[1] as Kept | null)?.harness === 'string',
-    ),
-  )
-}
-export function remember(w: World, $: Pick<EngineInterface, 'store'>, agentId: string, kept: Kept): Promise<void> {
-  const write = async () => {
-    const others = Object.entries(await roster($))
-      .filter(([id]) => id !== agentId)
-      .slice(-(ROSTER_KEPT - 1))
-    await $.store.set(ROSTER, Object.fromEntries([...others, [agentId, kept]])).catch(() => undefined)
-  }
-  w.roster = (w.roster ?? Promise.resolve()).then(write)
-  return w.roster
-}
-
-export async function adapterOf(w: World, $: Parameters<StepHook>[0], agentId: string): Promise<Adapter | undefined> {
+// Which harness runs an agent, from its record; else from agent.list, for an agent spawned before via loaded.
+// The record comes first: the new process of a session sent to the background resumes the agent as
+// general-purpose, and its step would go to Claude under the harness's model name.
+export async function adapterOf(w: World, $: Engine, agentId: string): Promise<Adapter | undefined> {
   if (w.others.has(agentId)) return undefined
-  const known = w.agents.get(agentId)
+  const record = await recordOf(w, $, agentId)
+  const known = record ? w.adapters.get(record.harness) : undefined
   if (known) return known
-  // Ahead of agent.list: the new process of a session sent to the background resumes the agent as
-  // general-purpose. Its step would go to Claude under the harness's model name.
-  const kept = (await roster($))[agentId]
-  const remembered = kept ? w.adapters.get(kept.harness) : undefined
-  if (remembered) {
-    w.agents.set(agentId, remembered)
-    if (kept?.nested) w.lost.add(agentId)
-    return remembered
-  }
   const agent = (await $.agent.list()).find((a) => a.id === agentId)
   // Not listed yet: decide on a later step rather than caching a guess.
   if (agent === undefined) return undefined
   const [plugin, name = ''] = agent.type.split(':')
   const adapter = plugin === $.plugin.name ? w.adapters.get(name) : undefined
-  if (adapter) w.agents.set(agentId, adapter)
+  // The spawn's mode is unknown here, so the strictest: a read-only run, never one with more permission than
+  // the person gave. In memory only, so a store that failed to answer cannot lose the real record.
+  if (adapter) w.records.set(agentId, { harness: adapter.name, handback: false, mode: 'plan', rebuilt: true })
   else w.others.add(agentId)
   return adapter
 }
 
-// Persisted first: a reload forgets the map but not the decision.
-async function handbackOf(w: World, $: Parameters<StepHook>[0], agentId: string): Promise<boolean> {
-  const saved = (await $.state.get({ plugin: 'via', key: 'handbacks', id: agentId })).value
-  if (saved === true || w.handbacks.get(agentId) === true || (await handbackAsked($, agentId))) return true
-  return (await roster($))[agentId]?.handback === true
+// The spawn's terms, or the engine's handback reminder in the agent's conversation.
+async function handbackOf($: Engine, agentId: string, record: AgentRecord): Promise<boolean> {
+  return record.handback || (await handbackAsked($, agentId))
 }
 
 // Walks up from the session's folder: relative paths resolve there, and the root is its own parent.
 // Says `unchecked` when it cannot finish (a stat refused, or a hook withheld realPath): not proven clean.
 async function foundAbove(
-  $: Parameters<StepHook>[0],
+  $: Engine,
   folder: string,
   harmless: readonly string[],
   skip?: string,
@@ -95,7 +68,7 @@ async function foundAbove(
   return 'unchecked'
 }
 
-async function probeModel($: Parameters<StepHook>[0], adapter: Adapter, choice: Choice, session?: string): Promise<string | undefined> {
+async function probeModel($: Engine, adapter: Adapter, choice: Choice, session?: string): Promise<string | undefined> {
   if (!adapter.probe) return undefined
   const env = adapter.probe.env?.(choice)
   const asked = await $.process
@@ -104,165 +77,102 @@ async function probeModel($: Parameters<StepHook>[0], adapter: Adapter, choice: 
   return asked?.exitCode === 0 ? adapter.probe.model(asked.stdout) : undefined
 }
 
-// Type stripping, which runs relay/relay.mjs and mcp/step.mts as is, is on by default from Node 22.18.
-const nodeOk = (version: string) => {
-  const [major = 0, minor = 0] = version.split('.').map(Number)
-  return major > 22 || (major === 22 && minor >= 18)
-}
-
-// Every harness needs Node, for the step server that reports its tool calls, and the relay too; an ACP
-// adapter that installs needs its pinned copy, installed once. A string says why the run cannot start.
-async function relayReady(w: World, $: Parameters<StepHook>[0], adapter: Adapter): Promise<{ installed?: string } | string> {
-  w.node ??= $.process.run(['node', '-p', 'process.versions.node'], { timeoutMs: 15_000 }).then(
-    (r) => (r.exitCode === 0 ? r.stdout.trim() : undefined),
-    () => undefined,
-  )
-  const version = await w.node
-  if (!version || !nodeOk(version))
-    return `via needs Node 22.18 or later on PATH to run ${adapter.name}${version ? `, not ${version}` : ''}. Install a current Node LTS and restart Claude Code.`
-  if (!adapter.relay) return {}
-  const install = adapter.relay.install
-  if (!install) return {}
-  const home = (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
-  if (!home) return `${adapter.name} needs a home folder to install ${install.dir} into.`
-  const latest = w.codexAcp === 'latest'
-  const dir = `${home}/.claude/via/acp/${latest ? 'latest' : install.dir}`
-  const entry = `${dir}/${install.entry}`
-  let installing = w.installs.get(dir)
-  if (!installing) {
-    installing = (async () => {
-      // In via's own folder, so a project's .npmrc never applies; no install scripts, and no Codex binary:
-      // codex-acp is pointed at the person's own codex.
-      const flags = ['--ignore-scripts', '--omit=optional', '--no-audit', '--no-fund']
-      let argv: string[]
-      if (latest) {
-        // The newest, once per Claude Code session, unpinned: the person chose upstream over review.
-        await $.fs.write(`${dir}/package.json`, '{ "private": true }\n')
-        argv = ['npm', 'install', ...flags, `${install.package}@latest`]
-      } else {
-        if (
-          await $.fs.stat(entry).then(
-            (s) => s.kind === 'file',
-            () => false,
-          )
-        )
-          return entry
-        for (const file of install.files) await $.fs.write(`${dir}/${file.split('/').at(-1)}`, await $.fs.read(`${$.plugin.root}/${file}`))
-        // Exactly the locked tree, each package's integrity checked by npm.
-        argv = ['npm', 'ci', ...flags]
-      }
-      const done = await $.process
-        .run(argv, { cwd: dir, timeoutMs: 300_000 })
-        .catch((error: unknown) => ({ exitCode: -1, stderr: String(error) }))
-      // Offline, latest keeps the newest it installed before rather than refusing.
-      if (
-        done.exitCode !== 0 &&
-        latest &&
-        (await $.fs.stat(entry).then(
-          (s) => s.kind === 'file',
-          () => false,
-        ))
-      )
-        return entry
-      if (done.exitCode !== 0) throw new Error(done.stderr.trim().split('\n').slice(-3).join(' ') || `npm ci exited with ${done.exitCode}`)
-      return entry
-    })()
-    w.installs.set(dir, installing)
-  }
-  return installing.then(
-    (installed) => ({ installed }),
-    (error: unknown) => {
-      w.installs.delete(dir)
-      return `${adapter.name} could not install ${install.dir} (npm ci): ${String((error as { message?: unknown })?.message ?? error)}`
-    },
-  )
-}
-
 // A guard that cannot prove a read-only run safe refuses it; the string says why.
-async function readOnlyGuard($: Parameters<StepHook>[0], adapter: Adapter): Promise<Readonly<Record<string, string>> | string | undefined> {
+async function readOnlyGuard($: Engine, adapter: Adapter): Promise<Readonly<Record<string, string>> | string | undefined> {
   const guard = adapter.readOnlyGuard
   if (!guard) return undefined
   const listed = await $.process.run(guard.argv, { timeoutMs: 15_000 }).catch(() => undefined)
   return (listed?.exitCode === 0 ? guard.env(listed.stdout) : undefined) ?? guard.why
 }
 
+// A step that runs nothing: the agent's last answer again, or that its run was cut off (a session sent to
+// the background, or a reload mid-run). Handed back once, when the agent hands back; Claude Code takes the
+// last text as the answer even after a handback, so an answer already handed back is repeated as text.
+// force: the turn's run answered without a handback and Claude Code stepped again, asking for one.
+async function* replay(
+  w: World,
+  $: Engine,
+  e: Step,
+  agentId: string,
+  adapter: Adapter,
+  record: AgentRecord,
+  force = false,
+): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+  const said = record.report || cutOff(adapter.name)
+  // A transcript that cannot be read leaves the spawn's terms: a replay never fails over it.
+  if (!record.handedBack && (force || (await handbackOf($, agentId, record).catch(() => record.handback)))) {
+    await updateRecord(w, $, agentId, { handedBack: true })
+    return yield* deliver(adapter.name, e, 0, said, null)
+  }
+  return yield* respond(e, textChunks(said), said)
+}
+
 // A nested agent's steps: its harness subagent's rows and answer, read from its parent's run.
 async function* nestedStep(
   w: World,
-  $: Parameters<StepHook>[0],
-  e: Parameters<StepHook>[1],
+  $: Engine,
+  e: Step,
   agentId: string,
   adapter: Adapter,
-  nested: { key: string; report?: string },
+  record: AgentRecord,
   signal: AbortSignal,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
-  const job = w.jobs.get(agentId)
-  if (job !== undefined) return await kept(w, $, agentId, nested, yield* pump(w, job, e, signal, joining($, agentId, job.turnId)))
-  // After its handback, or a later message: the answer again, as text.
-  if (nested.report !== undefined) return yield* respond(e, textChunks(nested.report), nested.report)
-  const abort = new AbortController()
-  const handback = await handbackOf(w, $, agentId)
-  const started: Job = {
-    turnId: e.turnId,
-    gen: childRun(w, agentId, adapter.name, e, abort.signal, handback, (key) => $.viaChildren.wait({ key })),
-    held: [],
-    outputs: new Map(),
-    abort,
-    count: 0,
+  let job = w.jobs.get(agentId)
+  if (job === undefined) {
+    // After its answer, or a later message: the answer again.
+    if (record.report !== undefined) return yield* replay(w, $, e, agentId, adapter, record)
+    const abort = new AbortController()
+    const handback = await handbackOf($, agentId, record)
+    job = {
+      turnId: e.turnId,
+      gen: childRun(w, agentId, adapter.name, e, abort.signal, handback, (key) => $.viaChildren.wait({ key })),
+      held: [],
+      outputs: new Map(),
+      abort,
+      count: 0,
+    }
+    w.jobs.set(agentId, job)
   }
-  w.jobs.set(agentId, started)
-  return await kept(w, $, agentId, nested, yield* pump(w, started, e, signal, joining($, agentId, e.turnId)))
-}
-
-// A nested agent's answer, saved once it has one: a new process has no parent run to read it from (lost).
-// childRun has handed it back by then, so a new process must not hand it back again.
-async function kept(
-  w: World,
-  $: Parameters<StepHook>[0],
-  agentId: string,
-  nested: { report?: string },
-  result: TurnStepResult,
-): Promise<TurnStepResult> {
-  if (nested.report === undefined) return result
-  await saveNested(w, $, agentId, nested.report)
+  const result = yield* pump(w, job, e, signal, joining($, agentId, job.turnId))
+  // Its answer, once it has one, for a later step and a new process. childRun has handed it back by then.
+  // Handed back only if that step did: a run that could not be followed ends as text.
+  if (job.final?.answer) {
+    const handedBack = job.final.toolUses.some((use) => use.name === HANDBACK_TOOL)
+    await updateRecord(w, $, agentId, { report: job.final.answer, handedBack })
+  }
   return result
 }
 
-export async function saveNested(w: World, $: Parameters<StepHook>[0], agentId: string, report: string): Promise<void> {
-  await $.state.set({ plugin: 'via', key: 'reports', id: agentId }, report).catch(() => undefined)
-  if (await handbackOf(w, $, agentId).catch(() => false))
-    await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, true).catch(() => undefined)
-}
-
 // A step's wait for its run's next chunk: the engine's bounded wait, see waitStep.
-function joining($: Parameters<StepHook>[0], agentId: string, turnId: string): () => Promise<void> {
+function joining($: Engine, agentId: string, turnId: string): () => Promise<void> {
   return () => $.viaSteps.wait({ agentId, turnId })
 }
 
 // A run outlives the step that started it: each harness tool call ends a step with a call to via's
 // tool, whose tool.call hook reads the run on until the harness finishes that call (answerCall), and
 // the next step reads on from there. Whichever hook reads the run lends it its abort signal.
-export async function* turnStep(w: World, $: Parameters<StepHook>[0], e: Parameters<StepHook>[1], next: Parameters<StepHook>[2]) {
+export async function* turnStep(w: World, $: Engine, e: Step, next: Parameters<StepHook>[2]) {
   const agentId = e.agentId
   if (agentId === undefined) return yield* next(e)
   const adapter = await adapterOf(w, $, agentId)
-  if (adapter === undefined) return yield* next(e)
-  const nested = w.nested.get(agentId)
-  if (nested !== undefined) return yield* nestedStep(w, $, e, agentId, adapter, nested, next.signal)
-  // A nested agent the old process spawned: its parent's run is gone, so its saved answer or the cut-off,
-  // never a new run of the harness on the nested agent's prompt.
-  if (w.lost.has(agentId)) return yield* lost(w, $, e, agentId, adapter)
-  if (w.turns.get(e.turnId)?.wake) {
-    const saved = (await $.state.get({ plugin: 'via', key: 'reports', id: agentId })).value ?? ''
-    return yield* respond(e, textChunks(saved), saved)
+  const record = w.records.get(agentId)
+  if (adapter === undefined || record === undefined) return yield* next(e)
+  if (record.nested) {
+    // One another process spawned has no parent run here: its saved answer or the cut-off, never a new run
+    // of the harness on the nested agent's prompt.
+    if (!w.nested.has(agentId)) return yield* replay(w, $, e, agentId, adapter, record)
+    return yield* nestedStep(w, $, e, agentId, adapter, record, next.signal)
   }
+  const turn = w.turns.get(e.turnId)
+  if (turn?.wake) return yield* respond(e, textChunks(record.report ?? ''), record.report ?? '')
   const job = w.jobs.get(agentId)
   if (job !== undefined) {
     if (job.turnId === e.turnId) return yield* pump(w, job, e, next.signal, joining($, agentId, e.turnId))
     endJob(w, agentId)
   }
-  const started = yield* begin(w, adapter, $, e, agentId)
-  if (started === undefined) return yield* respond(e, [{ kind: 'stop', stopReason: 'end_turn', usage: null }], '')
+  if (turn === undefined) return yield* replay(w, $, e, agentId, adapter, record)
+  if (turn.done) return yield* replay(w, $, e, agentId, adapter, record, true)
+  const started = yield* begin(w, adapter, $, e, agentId, record, turn)
   if ('answer' in started) return started
   w.jobs.set(agentId, started)
   return yield* pump(w, started, e, next.signal, joining($, agentId, e.turnId))
@@ -272,18 +182,12 @@ export async function* turnStep(w: World, $: Parameters<StepHook>[0], e: Paramet
 async function* begin(
   w: World,
   adapter: Adapter,
-  $: Parameters<StepHook>[0],
-  e: Parameters<StepHook>[1],
+  $: Engine,
+  e: Step,
   agentId: string,
-): AsyncGenerator<TurnStepChunk, TurnStepResult | Job | undefined> {
-  const turn = w.turns.get(e.turnId)
-  if (turn === undefined) return yield* lost(w, $, e, agentId, adapter)
-  if (turn.delivered) return yield* respond(e, textChunks(turn.report ?? ''), turn.report ?? '')
-  if (turn.report !== undefined) {
-    await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, true)
-    return yield* deliver(adapter.name, e, turn, 0, turn.report, null)
-  }
-
+  record: AgentRecord,
+  turn: Turn,
+): AsyncGenerator<TurnStepChunk, TurnStepResult | Job> {
   const defaultModel = adapter.defaultModel ? w.defaultModel : ''
   if (defaultModel && !isModel(defaultModel)) {
     const bad = `The via plugin's defaultModel setting ${JSON.stringify(defaultModel)} is not a ${adapter.name} --model pattern.`
@@ -299,22 +203,27 @@ async function* begin(
     return yield* respond(e, textChunks(bad), bad)
   }
 
-  const ref = { plugin: 'via', key: 'agents', id: agentId } as const
-  const held = await $.state.get(ref)
+  const held = record.choice
   const merged: Choice = {
-    ...held.value,
+    ...held,
     ...(asked.model ? { model: asked.model } : {}),
     ...(asked.tools ? { tools: asked.tools } : {}),
     ...(asked.thinking ? { thinking: asked.thinking } : {}),
   }
-  const changed = merged.model !== held.value?.model || merged.tools !== held.value?.tools || merged.thinking !== held.value?.thinking
-  if (changed) await $.state.set(ref, merged)
+  const changed = merged.model !== held?.model || merged.tools !== held?.tools || merged.thinking !== held?.thinking
+  if (changed) await updateRecord(w, $, agentId, { choice: merged })
 
   // What the person allows Claude itself, as the spawn carried it: plan mode is read-only here too.
-  const mode = (w.modes.get(agentId) ?? (await $.state.get({ plugin: 'via', key: 'modes', id: agentId })).value ?? 'default') as Mode
+  const mode = record.mode as Mode
   const withModel: Choice = merged.model ? merged : { ...merged, ...(defaultModel ? { model: defaultModel } : {}) }
+  // An agent with no record runs read-only (adapterOf): its refusals say so, not that the person chose it.
+  const anyway = record.rebuilt
+    ? `via has no record of the permission mode this agent was spawned with, so it runs read-only. Start a new agent to run it with your current mode.`
+    : 'To run it anyway, start a new agent without `tools: read`, outside plan mode; or ask a harness that can enforce read-only.'
   if (mode === 'plan' && adapter.readOnly === 'none') {
-    const refused = `${adapter.name} cannot run in plan mode: it has no read-only mode that via can enforce. Leave plan mode to run it, or ask a harness that can enforce read-only.`
+    const refused = record.rebuilt
+      ? `${adapter.name} cannot run read-only: it has no read-only mode that via can enforce. ${anyway}`
+      : `${adapter.name} cannot run in plan mode: it has no read-only mode that via can enforce. Leave plan mode to run it, or ask a harness that can enforce read-only.`
     return yield* respond(e, textChunks(refused), refused)
   }
   // Plan mode is read-only whatever tools line the prompt carries: a pi list such as `bash` would run commands.
@@ -326,25 +235,24 @@ async function* begin(
   if (unsafe && found) {
     const refused =
       found === 'unchecked'
-        ? `${adapter.name} cannot run read-only here: this folder and those above it could not all be checked for ${unsafe.folder}, and ${unsafe.why}. To run it anyway, start a new agent without \`tools: read\`, outside plan mode; or ask a harness that can enforce read-only.`
-        : `${adapter.name} cannot run read-only here: ${unsafe.why} (${found}). To run it anyway, start a new agent without \`tools: read\`, outside plan mode; or ask a harness that can enforce read-only.`
+        ? `${adapter.name} cannot run read-only here: this folder and those above it could not all be checked for ${unsafe.folder}, and ${unsafe.why}. ${anyway}`
+        : `${adapter.name} cannot run read-only here: ${unsafe.why} (${found}). ${anyway}`
     return yield* respond(e, textChunks(refused), refused)
   }
   const guard = chosen.tools === 'read' ? await readOnlyGuard($, adapter) : undefined
   if (typeof guard === 'string') {
-    const refused = `${adapter.name} cannot run read-only here: ${guard}. To run it anyway, start a new agent without \`tools: read\`, outside plan mode; or ask a harness that can enforce read-only.`
+    const refused = `${adapter.name} cannot run read-only here: ${guard}. ${anyway}`
     return yield* respond(e, textChunks(refused), refused)
   }
-  const ready = await relayReady(w, $, adapter)
+  const ready = await relayReady(w, $, adapter, w.latest.has(adapter.name))
   if (typeof ready === 'string') return yield* respond(e, textChunks(ready), ready)
   const early = adapter.probe && !adapter.probe.after ? probeModel($, adapter, chosen) : undefined
   const probe = (latest: string | undefined) => early ?? (latest ? probeModel($, adapter, chosen, latest) : Promise.resolve(undefined))
-  // Only this run's report may answer a later no-turn step: an aborted run leaves none.
-  await $.state.set({ plugin: 'via', key: 'reports', id: agentId }, '')
-  await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, false)
+  // Only this run's answer may answer a later step that runs nothing: an aborted run leaves none.
+  await updateRecord(w, $, agentId, { report: '', handedBack: false })
   const abort = new AbortController()
   // The run keeps this step's `$` for its whole life, through later steps and tool calls.
-  const job: Job = {
+  return {
     turnId: e.turnId,
     abort,
     held: [],
@@ -355,6 +263,7 @@ async function* begin(
       e,
       turn,
       agentId,
+      record,
       prompt: asked.prompt,
       chosen,
       mode,
@@ -364,47 +273,15 @@ async function* begin(
       signal: abort.signal,
     }),
   }
-  return job
-}
-
-// A step with no turn: the agent's saved answer, or that its run was cut off.
-async function* lost(
-  w: World,
-  $: Parameters<StepHook>[0],
-  e: Parameters<StepHook>[1],
-  agentId: string,
-  adapter: Adapter,
-): AsyncGenerator<TurnStepChunk, TurnStepResult> {
-  // A compaction can take a step with no turn.start: keep the agent's real answer, not the stub.
-  // Claude Code takes the last text as the result even after a handback, so a delivered report is
-  // repeated as text, and only an undelivered one is handed back.
-  const saved = (await $.state.get({ plugin: 'via', key: 'reports', id: agentId })).value
-  if (saved) {
-    const handed = (await $.state.get({ plugin: 'via', key: 'handedBack', id: agentId })).value === true
-    if (!handed && (await handbackOf(w, $, agentId))) {
-      await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, true)
-      return yield* deliver(adapter.name, e, { prompt: '', report: saved, delivered: false }, 0, saved, null)
-    }
-    return yield* respond(e, textChunks(saved), saved)
-  }
-  // This hook runs, so via is loaded: the turn was lost, in a session sent to the background (its new
-  // process resumes the agent without a turn.start) or a reload mid-run, not never run.
-  // Handed back once: the step after the handback has no turn either, and must not hand back again.
-  const said = cutOff(adapter.name)
-  const handed = (await $.state.get({ plugin: 'via', key: 'handedBack', id: agentId })).value === true
-  if (!handed && (await handbackOf(w, $, agentId))) {
-    await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, true)
-    return yield* deliver(adapter.name, e, { prompt: '', report: said, delivered: false }, 0, said, null)
-  }
-  return yield* respond(e, textChunks(said), said)
 }
 
 // What one run needs, settled before it starts.
 type Drive = {
   adapter: Adapter
   e: { turnId: string; index: number }
-  turn: NonNullable<ReturnType<World['turns']['get']>>
+  turn: Turn
   agentId: string
+  record: AgentRecord
   prompt: string
   chosen: Choice
   mode: Mode
@@ -415,14 +292,14 @@ type Drive = {
 }
 
 async function* drive(w: World, $: EngineInterface, d: Drive): AsyncGenerator<TurnStepChunk | Mark, TurnStepResult> {
-  const { adapter, e, turn, agentId, chosen, mode, installed, guard, probe, signal } = d
+  const { adapter, e, turn, agentId, record, chosen, mode, installed, guard, probe, signal } = d
   let prompt = d.prompt
   let block = 0
   let result: RunResult
   const models = chosen.model ? await cachedModels($, adapter, w.defaultModel) : []
   // An interrupted run is followed at once by its message, on the same session.
   for (;;) {
-    const session = (await $.state.get({ plugin: 'via', key: 'sessions', id: agentId })).value
+    const session = record.session
     const inbox = adapter.steer ? await openInbox($, adapter.name, agentId, w.inboxes) : undefined
     result = yield* run(w, adapter, $, {
       agentId,
@@ -439,7 +316,7 @@ async function* drive(w: World, $: EngineInterface, d: Drive): AsyncGenerator<Tu
       probe,
       // Saved the moment the harness issues it: a reload mid-run must not lose the session.
       save: async (id) => {
-        if (id !== session) await $.state.set({ plugin: 'via', key: 'sessions', id: agentId }, id)
+        if (id !== session) await updateRecord(w, $, agentId, { session: id })
       },
     })
     if (result.next === undefined) break
@@ -448,10 +325,10 @@ async function* drive(w: World, $: EngineInterface, d: Drive): AsyncGenerator<Tu
     block = result.block
   }
   if (result.aborted) return yield* respond(e, [{ kind: 'stop', stopReason: 'end_turn', usage: null }], '')
-  const handback = await handbackOf(w, $, agentId)
-  turn.report = result.signed
-  await $.state.set({ plugin: 'via', key: 'reports', id: agentId }, result.signed)
-  await $.state.set({ plugin: 'via', key: 'handedBack', id: agentId }, handback)
-  if (handback) return yield* deliver(adapter.name, e, turn, result.block, result.signed, result.usage)
+  // The run has answered: a transcript that cannot be read must not cost the answer.
+  const handback = await handbackOf($, agentId, record).catch(() => record.handback)
+  turn.done = true
+  await updateRecord(w, $, agentId, { report: result.signed, handedBack: handback })
+  if (handback) return yield* deliver(adapter.name, e, result.block, result.signed, result.usage)
   return yield* respond(e, [{ kind: 'stop', stopReason: 'end_turn', usage: result.usage }], result.signed)
 }

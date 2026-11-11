@@ -226,7 +226,7 @@ test('help is generated from the adapter fields', () => {
   expect(stubHelp).toContain('— answered by stub')
   expect(HELP).toContain('off, minimal, low, medium, high, xhigh, max')
   expect(HELP).toContain('passed to pi as its tool list')
-  expect(HELP).toContain('read is read-only; any other list, such as -bash,read, can still edit')
+  expect(HELP).toContain('a list of only read, grep, find, ls is read-only; any other, such as -bash,read, can edit')
   expect(HELP).toContain('at its next step')
   expect(HELP).toContain('interrupt:')
 })

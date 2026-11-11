@@ -24,12 +24,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # The oldest Node the README promises (type stripping on by default), and the current one.
+        node: ['22.18', '26']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: 26
+          node-version: ${{ matrix.node }}
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@latest && claude --version
       - name: Validate

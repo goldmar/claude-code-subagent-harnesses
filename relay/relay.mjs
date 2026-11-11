@@ -10451,8 +10451,8 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
 `);
     queue.push(text);
   };
-  let codexSteers = Promise.resolve();
-  const steerCodex = (text) => codexSteers = codexSteers.then(async () => {
+  let extensionSteers = Promise.resolve();
+  const steerByExtension = (text) => extensionSteers = extensionSteers.then(async () => {
     if (!busy || interrupt !== void 0) return void queue.push(text);
     const r = await ctx.request("_session/steering", prompted(text)).catch((error2) => refused(text, error2));
     if (r === void 0) return;
@@ -10461,7 +10461,7 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
     });
     queue.push(text);
   });
-  const steerOpencode = async (text) => {
+  const steerByPrompt = async (text) => {
     const r = await ctx.request(methods.agent.session.prompt, prompted(text)).catch((error2) => refused(text, error2));
     if (r === void 0 || r.stopReason === "cancelled") return;
     out({ relay: "steered" });
@@ -10471,7 +10471,7 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
     }
   };
   const steer = (text) => {
-    const done = (process.env.RELAY_STEER === "steering" ? steerCodex(text) : steerOpencode(text)).finally(
+    const done = (process.env.RELAY_STEER === "steering" ? steerByExtension(text) : steerByPrompt(text)).finally(
       () => steering.delete(done)
     );
     steering.add(done);

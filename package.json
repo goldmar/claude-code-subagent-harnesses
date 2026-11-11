@@ -8,8 +8,8 @@
     "build:relay": "esbuild relay/src/relay.mts --bundle --platform=node --format=esm --target=node22 --legal-comments=inline --outfile=relay/relay.mjs --banner:js='// Built from relay/src/relay.mts by pnpm build:relay; do not edit.'",
     "lint": "biome ci .",
     "format": "biome check --write .",
-    "test:relay": "node --test relay/test/",
-    "test:mcp": "node --test mcp/test/"
+    "test:relay": "node --test relay/test/*.test.mjs",
+    "test:mcp": "node --test mcp/test/*.test.*"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "2.6.0",

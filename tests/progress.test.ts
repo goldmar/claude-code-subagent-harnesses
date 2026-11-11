@@ -3,8 +3,7 @@ import { drawCall, drawGroup, NO_OUTPUT } from '../hooks/acp/render'
 import { pi } from '../hooks/adapters/pi'
 import { stepOf } from '../hooks/progress'
 import { run as runHook } from '../hooks/run'
-import type { World } from '../hooks/world'
-import { ENV, hang, hold, run, type Spawn, type Write } from './helpers'
+import { ENV, hang, hold, run, type Spawn, testWorld, type Write } from './helpers'
 
 const START = { type: 'message_start', message: { role: 'assistant', provider: 'openrouter', model: 'kimi' } }
 // No call id: a text line, as agy sends, which feeds the panel row. pi's calls carry ids and become steps
@@ -102,29 +101,7 @@ test('an aborted run clears its agent-panel row', async () => {
   const step = new Promise<void>((resolve) => {
     stepped = resolve
   })
-  const world: World = {
-    adapters: new Map([['pi', pi]]),
-    defaultModel: '',
-    codexAcp: 'pinned',
-    installs: new Map(),
-    timeoutMinutes: 30,
-    turns: new Map(),
-    seeds: new Map(),
-    handbacks: new Map(),
-    modes: new Map(),
-    agents: new Map(),
-    others: new Set(),
-    lost: new Set(),
-    inboxes: new Map(),
-    descriptions: new Map(),
-    activity: new Map(),
-    channels: new Map(),
-    nested: new Map(),
-    spawns: new Map(),
-    tool: 'mcp__plugin_via_step__step',
-    jobs: new Map(),
-    calls: new Map(),
-  }
+  const world = testWorld({ adapters: new Map([['pi', pi]]) })
   const $ = {
     env: { get: async (name: string) => (name === 'HOME' ? '/home/u' : undefined) },
     fs: {
@@ -308,16 +285,7 @@ test('a folded run of harness calls is counted by what each did, in the order ea
 
 test('a run ended from outside while parked between pieces stops its harness', async () => {
   let killed = false
-  const world = {
-    adapters: new Map([['pi', pi]]),
-    timeoutMinutes: 30,
-    inboxes: new Map(),
-    descriptions: new Map(),
-    activity: new Map(),
-    channels: new Map(),
-    nested: new Map(),
-    spawns: new Map(),
-  } as unknown as World
+  const world = testWorld({ adapters: new Map([['pi', pi]]) })
   const $ = {
     env: { get: async () => undefined },
     fs: { write: async () => {} },
