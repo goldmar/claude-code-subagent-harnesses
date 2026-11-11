@@ -212,8 +212,15 @@ export const register: Register = (on, options) => {
         if (channel) channel.read = true
         return { deny: "via shows a harness's subagent only as a background agent, and background tasks are off" }
       }
-      const model = world.channels.get(key)?.model
-      const started = await next({ ...e, model: model ?? adapter.name, ...(model ? { description: `${e.description} · ${model}` } : {}) })
+      const channel = world.channels.get(key)
+      const model = channel?.model
+      const title = channel?.title ?? e.description
+      const started = await next({
+        ...e,
+        prompt: channel?.description ?? e.prompt,
+        model: model ?? adapter.name,
+        description: model ? `${title} · ${model}` : title,
+      })
       if (started.agentId) {
         world.nested.set(started.agentId, key)
         await createRecord(world, $, started.agentId, {
@@ -300,11 +307,14 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'ToolUse' }, (_, e, next) => (e.props.tool === world.tool ? drawCall(e.props) : next(e)))
   // Claude Code decides which calls fold; via only counts them, and only a run of its own calls alone.
-  on('ui.render', { component: 'ToolGroup' }, (_, e, next) =>
-    !e.props.isExpanded && e.props.isCallsOnly === true && e.props.calls.every((call) => call.tool === world.tool)
-      ? drawGroup(e.props)
-      : next(e),
-  )
+  on('ui.render', { component: 'ToolGroup' }, (_, e, next) => {
+    const { calls, isCallsOnly, isExpanded } = e.props
+    const ours = calls.length > 0 && calls.every((call) => call.tool === world.tool)
+    // A failed or interrupted call also clears isCallsOnly: its group keeps via's line, not the engine's.
+    // Only a group with other rows (hook timings, recalled memories) and no such call keeps the engine's.
+    const plain = isCallsOnly === true || calls.some((call) => call.isErrored || call.isInterrupted)
+    return !isExpanded && ours && plain ? drawGroup(e.props) : next(e)
+  })
   // The row shows the output already, all of it when expanded.
   on('ui.render', { component: 'ToolResult' }, (_, e, next) => (e.props.tool === world.tool ? { type: 'Box', children: [] } : next(e)))
 

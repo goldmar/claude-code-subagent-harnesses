@@ -115,6 +115,9 @@ function take(s: RunState, c: Context, event: Norm): (TurnStepChunk | Mark)[] {
       return [s.writer.text(event.t)]
     case 'thinking':
       return [s.writer.thinking(event.t)]
+    case 'user':
+      // The root already has native input rows; only nested channels display copied input.
+      return []
     case 'call': {
       s.open.add(event.id)
       if (event.kind === 'compact') s.compacting.add(event.id)

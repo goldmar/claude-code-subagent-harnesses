@@ -1,9 +1,10 @@
 import type { ModelReasoningEffort } from '@openai/codex-sdk'
 import type { Choice } from '../../types'
-import { relayEvents, sessionLost } from '../acp/events'
+import { sessionLost } from '../acp/events'
 import { isRecord } from '../acp/json'
 import { type AcpMode, type AcpSpec, acpMode, acpStart } from '../acp/spec'
 import type { Adapter, Mode } from '../adapter'
+import { codexEvents } from './codex-children'
 
 const THINKING = [
   'minimal',
@@ -117,11 +118,12 @@ export const codex = {
       session,
       model: choice.model,
       thinking: choice.thinking,
+      config: choice.tier ? { 'fast-mode': choice.tier === 'fast' ? 'on' : 'off' } : undefined,
       command: ['node', installed],
       ...(readOnly ? { env: guard } : {}),
     })
   },
-  events: () => relayEvents(),
+  events: () => codexEvents(),
   // The relay names the model the session runs on.
   model: () => undefined,
   failure: (_exit, stderr) =>

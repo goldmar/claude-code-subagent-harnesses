@@ -5189,8 +5189,8 @@ function rewriteKeyNames(ctx) {
       bySchema.set(entry.schema, entry);
   }
   const rewrites = /* @__PURE__ */ new Map();
-  for (const record2 of pendingRecords.get(ctx) ?? []) {
-    const seen = ctx.seen.get(record2);
+  for (const record3 of pendingRecords.get(ctx) ?? []) {
+    const seen = ctx.seen.get(record3);
     const names = (seen?.def ?? seen?.schema)?.propertyNames;
     if (!names || names === true || rewrites.has(names))
       continue;
@@ -6393,12 +6393,12 @@ function defaultOnErrorOptionalStringTag(schema, key) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) {
       return value;
     }
-    const record2 = value;
-    const tag = record2[key];
+    const record3 = value;
+    const tag = record3[key];
     if (tag === void 0 || tag === null || typeof tag === "string") {
       return value;
     }
-    const normalized = { ...record2 };
+    const normalized = { ...record3 };
     delete normalized[key];
     return normalized;
   }, schema);
@@ -10253,6 +10253,87 @@ var TerminalHandle = class _TerminalHandle {
   }
 };
 
+// relay/src/session-updates.mts
+var KNOWN = {
+  user_message_chunk: true,
+  agent_message_chunk: true,
+  agent_thought_chunk: true,
+  tool_call: true,
+  tool_call_update: true,
+  plan: true,
+  plan_update: true,
+  plan_removed: true,
+  available_commands_update: true,
+  current_mode_update: true,
+  config_option_update: true,
+  session_info_update: true,
+  usage_update: true,
+  notice: true,
+  compaction_update: true,
+  compaction_summary_chunk: true,
+  subagent_update: true,
+  session_message: true,
+  session_message_chunk: true
+};
+var record2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var childUpdate = (update) => {
+  if (typeof update.subagentSessionId !== "string") return;
+  if (update.sessionUpdate === "subagent_spawned") {
+    if (typeof update.name !== "string" || typeof update.task !== "string") return;
+    return {
+      sessionUpdate: "subagent_update",
+      sessionId: update.subagentSessionId,
+      title: update.name,
+      description: update.task,
+      state: { state: "running" }
+    };
+  }
+  if (update.sessionUpdate !== "subagent_state_update" || typeof update.state !== "string") return;
+  let state;
+  switch (update.state) {
+    case "running":
+      state = { state: "running" };
+      break;
+    case "completed":
+      state = { state: "idle", stopReason: "end_turn" };
+      break;
+    case "cancelled":
+      state = { state: "idle", stopReason: "cancelled" };
+      break;
+    case "failed":
+      state = { state: "idle", stopReason: "error", error: { code: -32603, message: "Subagent failed" } };
+      break;
+    default:
+      state = { state: "unknown" };
+  }
+  return { sessionUpdate: "subagent_update", sessionId: update.subagentSessionId, state };
+};
+var sessionUpdates = (stream2, ignored) => {
+  let count = 0;
+  return {
+    writable: stream2.writable,
+    readable: stream2.readable.pipeThrough(
+      new TransformStream({
+        transform(message, controller) {
+          if ("method" in message && message.method === "session/update" && !("id" in message)) {
+            const params = message.params;
+            if (record2(params) && typeof params.sessionId === "string" && record2(params.update)) {
+              const update = params.update;
+              if (typeof update.sessionUpdate === "string" && !Object.hasOwn(KNOWN, update.sessionUpdate)) {
+                const child = childUpdate(update);
+                if (child) controller.enqueue({ ...message, params: { ...params, update: child } });
+                else ignored(++count);
+                return;
+              }
+            }
+          }
+          controller.enqueue(message);
+        }
+      })
+    )
+  };
+};
+
 // relay/src/relay.mts
 var out = (event) => process.stdout.write(`${JSON.stringify(event)}
 `);
@@ -10272,8 +10353,8 @@ var fail = (message) => {
 var reason = (error2) => {
   const { message, data } = error2 ?? {};
   const said = String(message ?? error2);
-  const record2 = typeof data === "object" && data !== null ? data : void 0;
-  const words = typeof data === "string" ? data : typeof record2?.details === "string" ? record2.details : typeof record2?.message === "string" ? record2.message : "";
+  const record3 = typeof data === "object" && data !== null ? data : void 0;
+  const words = typeof data === "string" ? data : typeof record3?.details === "string" ? record3.details : typeof record3?.message === "string" ? record3.message : "";
   const cause = words.length > 500 ? `${words.slice(0, 500)}\u2026` : words;
   return cause && !said.includes(cause) ? `${said}: ${cause}` : said;
 };
@@ -10360,9 +10441,10 @@ var choose = (options, kind) => {
   const option = options.find((o) => o.kind === kind);
   return { outcome: option ? { outcome: "selected", optionId: option.optionId } : { outcome: "cancelled" } };
 };
-var stream = ndJsonStream2(
-  Writable.toWeb(agent.stdin),
-  Readable.toWeb(agent.stdout)
+var stream = sessionUpdates(
+  ndJsonStream2(Writable.toWeb(agent.stdin), Readable.toWeb(agent.stdout)),
+  // Count only: an unrecognized payload or tag may carry private agent output.
+  (count) => out({ relay: "ignored_session_update", count })
 );
 var result = await client({ name: "via" }).onRequest(methods.client.session.requestPermission, (ctx) => {
   const { toolCall, options } = ctx.params;
@@ -10425,9 +10507,7 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
   }
   for (const [configId, value] of Object.entries(extra)) {
     if (typeof value !== "string") fail(`RELAY_CONFIG.${configId} must be a string`);
-    const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId, value }).catch(
-      (error2) => fail(`the agent refused ${configId} ${String(value)}: ${String(error2?.message ?? error2)}`)
-    );
+    const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId, value }).catch((error2) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error2)}`));
     configOptions = set.configOptions ?? configOptions;
   }
   const current = configOptions.find((o) => o.id === "model");

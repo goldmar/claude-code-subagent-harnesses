@@ -7,9 +7,14 @@ import { test } from 'node:test'
 
 const relay = new URL('../relay.mjs', import.meta.url).pathname
 const agent = new URL('./fake-agent.mjs', import.meta.url).pathname
+// These tests can themselves run inside via: its live relay settings must not reach the fake agent.
+const envFor = (extra = {}) => ({
+  ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('RELAY_') && !key.startsWith('FAKE_'))),
+  ...extra,
+})
 
 test("an agent's error keeps the cause its data carries, not only 'Internal error'", () => {
-  const run = spawnSync('node', [relay, '--', 'node', agent], { input: 'hi', encoding: 'utf8', timeout: 20_000 })
+  const run = spawnSync('node', [relay, '--', 'node', agent], { input: 'hi', encoding: 'utf8', timeout: 20_000, env: envFor() })
   const events = run.stdout
     .split('\n')
     .filter(Boolean)
@@ -19,13 +24,13 @@ test("an agent's error keeps the cause its data carries, not only 'Internal erro
   assert.equal(run.status, 1)
 })
 
-const said = (input, cwd = process.cwd()) => {
+const said = (input, cwd = process.cwd(), env = {}) => {
   const run = spawnSync('node', [relay, '--', 'node', agent], {
     input,
     cwd,
     encoding: 'utf8',
     timeout: 20_000,
-    env: { ...process.env, FAKE_ECHO: '1' },
+    env: envFor({ FAKE_ECHO: '1', ...env }),
   })
   const text = run.stdout
     .split('\n')
@@ -41,6 +46,41 @@ test('the relay offers streamed command output, no terminal of its own, and no p
   assert.equal(offered.plan, undefined)
   assert.equal(offered._meta.terminal_output_delta, true)
   assert.equal(offered.terminal, false)
+})
+
+test('the relay sets fast mode and reasoning before prompting a new or resumed session', () => {
+  for (const value of ['on', 'off']) {
+    for (const session of ['', 's1']) {
+      const { opened, config } = said('go', process.cwd(), {
+        ...(session ? { RELAY_SESSION: session } : {}),
+        RELAY_CONFIG: JSON.stringify({ 'fast-mode': value, reasoning_effort: 'high' }),
+      })
+      assert.equal(opened, session ? 'load' : 'new')
+      assert.deepEqual(config, [
+        { sessionId: 's1', configId: 'fast-mode', value },
+        { sessionId: 's1', configId: 'reasoning_effort', value: 'high' },
+      ])
+    }
+  }
+})
+
+test('a refused fast-mode option fails before the prompt instead of answering at another tier', () => {
+  const run = spawnSync('node', [relay, '--', 'node', agent], {
+    input: 'go',
+    encoding: 'utf8',
+    timeout: 20_000,
+    env: envFor({ FAKE_ECHO: '1', FAKE_REFUSE_CONFIG: 'fast-mode', RELAY_CONFIG: '{"fast-mode":"on"}' }),
+  })
+  const events = run.stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+  assert.equal(run.status, 1)
+  assert.match(events.find((e) => e.relay === 'error')?.message ?? '', /the agent refused fast-mode on:.*fast mode unavailable/)
+  assert.equal(
+    events.some((e) => e.update?.sessionUpdate === 'agent_message_chunk'),
+    false,
+  )
 })
 
 test('an image under the working folder goes along to an agent that takes images; a missing, fake or outside one stays text', () => {

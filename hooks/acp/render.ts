@@ -34,17 +34,29 @@ const COUNTED: Record<string, [string, string, string, string]> = {
   delete: ['Deleting', 'Deleted', 'file', 'files'],
   move: ['Moving', 'Moved', 'file', 'files'],
   fetch: ['Fetching', 'Fetched', 'page', 'pages'],
+  wait: ['Waiting on', 'Waited on', 'command', 'commands'],
+}
+
+// A call's title as one line, with nothing hidden in it.
+function titleOf(input: unknown): string {
+  const title = (input as { title?: unknown } | null)?.title
+  return typeof title === 'string' ? unhidden(title).replace(/\s+/g, ' ') : ''
 }
 
 // The line Claude Code folds a run of harness tool calls into, counted by what each did ("Read 3 files,
 // ran 2 commands") in place of its "Called plugin:via:step 5 times". Styled as Claude Code's own: dim,
-// counts bold, undimmed under the pointer, since a click unfolds it.
+// counts bold, undimmed under the pointer, since a click unfolds it. Always this one line, from the
+// first call on: the running call's title rides on it, so a call joining, ending or failing changes
+// words, never rows. A blank line sets it apart from the agent's text above it, as the engine's own line is.
 export function drawGroup(props: RenderPropsOf['ToolGroup']): RenderElement {
+  const kindOf = (call: (typeof props.calls)[number]) => (call.input as { kind?: unknown } | null)?.kind
+  // A wait is a command still running after a step went by: counted with it, unless it is all there is.
+  const counted = props.calls.some((call) => kindOf(call) !== 'wait') ? props.calls.filter((call) => kindOf(call) !== 'wait') : props.calls
   const counts = new Map<string, number>()
-  for (const call of props.calls) {
-    const kind = (call.input as { kind?: unknown } | null)?.kind
-    const counted = typeof kind === 'string' && Object.hasOwn(COUNTED, kind) ? kind : 'other'
-    counts.set(counted, (counts.get(counted) ?? 0) + 1)
+  for (const call of counted) {
+    const kind = kindOf(call)
+    const known = typeof kind === 'string' && Object.hasOwn(COUNTED, kind) ? kind : 'other'
+    counts.set(known, (counts.get(known) ?? 0) + 1)
   }
   const parts = [...counts].flatMap(([kind, n], i): RenderNode[] => {
     const [live, done, one, many] = COUNTED[kind] ?? ['', '', 'other step', 'other steps']
@@ -53,11 +65,24 @@ export function drawGroup(props: RenderPropsOf['ToolGroup']): RenderElement {
     const said: RenderNode[] = [{ type: 'Text', props: { bold: true }, children: [String(n)] }, ` ${n === 1 ? one : many}`]
     return [...(i === 0 ? [] : [', ']), ...(lead ? [`${lead} `] : []), ...said]
   })
+  const failed = props.calls.filter((call) => call.isErrored || call.isInterrupted).length
+  const current = props.isActive ? (props.calls.findLast((call) => call.isRunning) ?? props.calls.at(-1)) : undefined
+  const title = current ? titleOf(current.input) : ''
   return {
     type: 'Box',
-    props: { key: 'via-group', paddingLeft: 2 },
+    props: { key: 'via-group', marginTop: 1, paddingLeft: 2 },
     children: [
-      { type: 'Text', props: { dimColor: true }, hover: { dimColor: false }, children: [...parts, ...(props.isActive ? ['…'] : [])] },
+      {
+        type: 'Text',
+        props: { dimColor: true, wrap: 'truncate-end' },
+        hover: { dimColor: false },
+        children: [
+          ...parts,
+          ...(failed > 0 ? [`, ${failed} failed`] : []),
+          ...(props.isActive ? ['…'] : []),
+          ...(title ? [` · ${title}`] : []),
+        ],
+      },
     ],
   }
 }
@@ -73,7 +98,7 @@ export function drawCall(props: RenderPropsOf['ToolUse']): RenderElement {
     path?: unknown
   }
   const kind = typeof input.kind === 'string' ? input.kind : 'other'
-  const title = typeof input.title === 'string' ? unhidden(input.title).replace(/\s+/g, ' ') : ''
+  const title = titleOf(input)
   const path = typeof input.path === 'string' ? unhidden(input.path) : ''
   const [running, done] = VERBS[kind] ?? ['', '']
   const verb = props.isInterrupted ? 'Interrupted' : props.isErrored ? 'Failed' : props.isRunning ? running : done

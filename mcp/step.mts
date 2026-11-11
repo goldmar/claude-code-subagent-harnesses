@@ -1,7 +1,7 @@
 // The server behind via's step tool. A tool.call hook answers every call with what the harness reported,
 // so a call that reaches this server is one nobody answered: it fails, it never runs anything.
-// A real MCP server, not $.tool.register: Claude Code folds a server's calls into one transcript line,
-// and leaves a registered tool's calls unfolded.
+// A real MCP server, not $.tool.register. Claude Code can group a server's calls; the render hook
+// keeps via-only groups on one counted line from the first call, with ctrl+o showing each call.
 // Node runs it as is: type stripping is on by default from Node 22.18.
 import { createInterface } from 'node:readline'
 

@@ -2,6 +2,7 @@ export type Choice = {
   model?: string
   tools?: string
   thinking?: string
+  tier?: 'fast' | 'default'
 }
 declare module 'claude-code' {
   interface EngineInterface {

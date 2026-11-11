@@ -330,3 +330,32 @@ test('tools: write is the same as no tools line where read is the only restricti
   expect(promptOf('tools: write\ngo', codex).error).toBeUndefined()
   expect(promptOf('tools: edit\ngo', opencode).error).toContain('read, write')
 })
+
+test('codex tier lines are parsed beside the other choices, with the first tier winning', () => {
+  expect(promptOf('model: gpt-6.1-sol\ntools: read\nthinking: high\ntier: fast\nreview', codex)).toEqual({
+    prompt: 'review',
+    model: 'gpt-6.1-sol',
+    tools: 'read',
+    thinking: 'high',
+    tier: 'fast',
+  })
+  expect(promptOf('codex-tier: default\ntier: fast\ngo', codex)).toEqual({ prompt: 'go', tier: 'default' })
+  expect(promptOf('review this\ntier: fast', codex)).toEqual({ prompt: 'review this\ntier: fast' })
+})
+
+test('tier refuses invalid values and every non-codex harness', () => {
+  for (const value of ['', 'priority', 'FAST', 'fast default']) {
+    const text = `tier: ${value}\ngo`
+    const asked = promptOf(text, codex)
+    expect(asked.error).toBeDefined()
+    expect(asked.prompt).toBe(text)
+    expect(asked.tier).toBeUndefined()
+  }
+  for (const adapter of [agy, opencode, pi, STUB]) {
+    expect(promptOf('tier: fast\ngo', adapter).error).toContain('tier is codex only')
+    expect(promptOf(`${adapter.name}-tier: default\ngo`, adapter).error).toContain('tier is codex only')
+    expect(helpOf(adapter, [])).not.toContain('tier: fast|default')
+  }
+  expect(helpOf(codex, [])).toContain('tier: fast|default')
+  expect(helpOf(codex, [])).toContain('idle follow-up')
+})

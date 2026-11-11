@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { Readable, Writable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk/unstable'
+import { sessionUpdates } from './session-updates.mjs'
 
 type Policy = 'allow' | 'deny' | 'ask'
 type Answer = (optionId: string | null) => void
@@ -165,9 +166,10 @@ const choose = (options: readonly acp.PermissionOption[], kind: acp.PermissionOp
   return { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } }
 }
 
-const stream = acp.ndJsonStream(
-  Writable.toWeb(agent.stdin) as WritableStream<Uint8Array>,
-  Readable.toWeb(agent.stdout) as ReadableStream<Uint8Array>,
+const stream = sessionUpdates(
+  acp.ndJsonStream(Writable.toWeb(agent.stdin) as WritableStream<Uint8Array>, Readable.toWeb(agent.stdout) as ReadableStream<Uint8Array>),
+  // Count only: an unrecognized payload or tag may carry private agent output.
+  (count) => out({ relay: 'ignored_session_update', count }),
 )
 const result = await acp
   .client({ name: 'via' })
@@ -250,9 +252,7 @@ const result = await acp
       if (typeof value !== 'string') fail(`RELAY_CONFIG.${configId} must be a string`)
       const set = await ctx
         .request(acp.methods.agent.session.setConfigOption, { sessionId, configId, value: value as string })
-        .catch((error: unknown) =>
-          fail(`the agent refused ${configId} ${String(value)}: ${String((error as { message?: unknown })?.message ?? error)}`),
-        )
+        .catch((error: unknown) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error)}`))
       configOptions = set.configOptions ?? configOptions
     }
     const current = configOptions.find((o) => o.id === 'model')

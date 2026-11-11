@@ -187,6 +187,7 @@ test('a codex agent runs codex-acp behind the relay, with its prompt on stdin', 
   expect(spawns[0]?.argv.slice(1)).toEqual([`${ROOT}/relay/relay.mjs`, '--', 'node', ENTRY])
   expect(spawns[0]?.argv[0]).toBe('node')
   expect(spawns[0]?.input).toBe('run the tests')
+  expect(spawns[0]?.env?.RELAY_CONFIG).toBeUndefined()
   expect(spawns[0]?.env).toMatchObject({
     RELAY_POLICY: 'ask',
     RELAY_AGENT_MODE: 'workspace-write',
@@ -412,6 +413,54 @@ test('a thinking line becomes the reasoning_effort config option; a level codex 
   expect(result.answer).toContain('thinking must be one of minimal, low')
 })
 
+test('a tier choice persists with the other choices and an idle follow-up replaces it', async ($, on) => {
+  const spawns: Spawn[] = []
+  const { records } = arrange(on, spawns)
+  const choices: unknown[] = []
+  const texts = ['model: gpt-6.1-sol\ntools: read\nthinking: high\ntier: fast\nlook', 'and the tests', 'tier: default\nreview', 'finish']
+  for (const [index, text] of texts.entries()) {
+    const step = { ...STEP, turnId: `t${index + 1}`, messageCount: index + 1 }
+    await $.turn.start({ turnId: step.turnId, agentId: 'a1', text })
+    await runTurn($, step)
+    choices.push({ ...records.record('a1')?.choice })
+  }
+  expect(spawns).toHaveLength(4)
+  expect(spawns.map((s) => JSON.parse(s.env?.RELAY_CONFIG ?? '{}'))).toEqual(
+    ['on', 'on', 'off', 'off'].map((value) => ({ 'fast-mode': value, reasoning_effort: 'high' })),
+  )
+  for (const spawn of spawns) {
+    expect(spawn.env).toMatchObject({ RELAY_MODEL: 'gpt-6.1-sol', RELAY_AGENT_MODE: 'read-only', RELAY_POLICY: 'deny' })
+  }
+  expect(spawns.slice(1).every((s) => s.env?.RELAY_SESSION === SID)).toBe(true)
+  expect(spawns.map((s) => s.input)).toEqual(['look', 'and the tests', 'review', 'finish'])
+  const choice = { model: 'gpt-6.1-sol', tools: 'read', thinking: 'high' }
+  expect(choices).toEqual(['fast', 'fast', 'default', 'default'].map((tier) => ({ ...choice, tier })))
+})
+
+test('a tier saved before a process restart is applied with its session and permission mode', async ($, on) => {
+  const spawns: Spawn[] = []
+  const { records } = arrange(on, spawns)
+  const choice = { tier: 'fast' as const, thinking: 'high' }
+  records.seed('a1', { choice, session: SID, mode: 'dontAsk' })
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
+  await runTurn($)
+  expect(JSON.parse(spawns[0]?.env?.RELAY_CONFIG ?? '{}')).toEqual({ 'fast-mode': 'on', reasoning_effort: 'high' })
+  expect(spawns[0]?.env).toMatchObject({ RELAY_SESSION: SID, RELAY_POLICY: 'deny' })
+  expect(records.record('a1')?.choice).toEqual(choice)
+  expect(records.record('a1')?.mode).toBe('dontAsk')
+})
+
+test('an invalid tier neither starts codex nor overwrites its saved choice', async ($, on) => {
+  const spawns: Spawn[] = []
+  const { records } = arrange(on, spawns)
+  records.seed('a1', { choice: { tier: 'fast' } })
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'tier: priority\ngo' })
+  const { result } = await runTurn($)
+  expect(result.answer).toContain('tier must be one of fast, default')
+  expect(spawns).toEqual([])
+  expect(records.record('a1')?.choice).toEqual({ tier: 'fast' })
+})
+
 test('a lost session is forgotten, so the next message starts fresh', async ($, on) => {
   const spawns: Spawn[] = []
   const { records } = arrange(on, spawns, {
@@ -556,6 +605,48 @@ test('the dialog drops bidirectional and zero-width characters that could disgui
   await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
   await runTurn($)
   expect(asked[0]).toBe('codex wants to run `echo safe; rm -rf ~`. Allow it?')
+})
+
+test('three commands emit one row and result each despite pending placeholders and repeated ACP updates', async ($, on) => {
+  const spawns: Spawn[] = []
+  const commands = [1, 2, 3].flatMap((index) => {
+    const update = (status: string, title: string, sessionUpdate = 'tool_call_update') => ({
+      sessionId: SID,
+      update: {
+        sessionUpdate,
+        toolCallId: `command-${index}`,
+        status,
+        title,
+        kind: 'execute',
+        ...(status === 'completed' ? { rawOutput: String(index) } : {}),
+      },
+    })
+    return [
+      update('pending', 'exec_command', 'tool_call'),
+      update('in_progress', `echo ${index}`),
+      update('in_progress', `echo ${index}`),
+      update('completed', `echo ${index}`),
+      update('completed', `echo ${index}`),
+      update('in_progress', `echo ${index}`),
+    ]
+  })
+  arrange(on, spawns, {
+    stdout: lines([
+      ...CAPTURED.slice(0, 3),
+      ...commands,
+      chunk('answer', 'DONE'),
+      { relay: 'prompt_done', stopReason: 'end_turn' },
+      { relay: 'done', stopReason: 'end_turn' },
+    ]),
+  })
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
+  const { chunks, calls } = await runTurn($)
+  expect(chunks.filter((c) => c.kind === 'tool').map((c) => c.id)).toEqual(['toolu_step_t1_1', 'toolu_step_t1_2', 'toolu_step_t1_3'])
+  expect(chunks.flatMap((c) => (c.kind === 'input' ? [JSON.parse(c.json)] : []))).toEqual(
+    [1, 2, 3].map((index) => ({ kind: 'execute', title: `echo ${index}` })),
+  )
+  expect(calls).toEqual([{ result: '1' }, { result: '2' }, { result: '3' }])
+  expect(spawns).toHaveLength(1)
 })
 
 test('a /compact turn shows the compaction as a row and answers that it compacted, not that codex said nothing', async ($, on) => {

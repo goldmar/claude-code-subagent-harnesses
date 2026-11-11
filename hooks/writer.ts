@@ -38,6 +38,15 @@ export class StepWriter {
     return this.push('thinking', t)
   }
 
+  // Input copied into a nested transcript. A late acknowledgement must leave the answer intact.
+  user(text: string, preserveAnswer = false): Mark {
+    if (!preserveAnswer) {
+      this.message()
+      this.boundary()
+    } else this.kind = undefined
+    return { kind: 'user', text }
+  }
+
   // A new message: only the last one is the answer.
   message(): void {
     this.report = ''
