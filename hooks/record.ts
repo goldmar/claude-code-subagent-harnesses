@@ -10,7 +10,7 @@ export type AgentRecord = {
   handback: boolean // spawned locally in auto mode: its answer goes back as a SubagentHandback
   mode: string // Claude Code's permission mode at the spawn
   description?: string // the spawn's Agent description, for its panel row
-  choice?: Choice // the model, tools and thinking its prompts asked for
+  choice?: Choice // the model, tools, thinking and Codex tier its prompts asked for
   session?: string // the harness's session, which its next turn resumes
   report?: string // its last answer
   handedBack?: boolean // that answer has gone back

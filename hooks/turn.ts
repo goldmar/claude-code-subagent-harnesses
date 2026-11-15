@@ -209,8 +209,10 @@ async function* begin(
     ...(asked.model ? { model: asked.model } : {}),
     ...(asked.tools ? { tools: asked.tools } : {}),
     ...(asked.thinking ? { thinking: asked.thinking } : {}),
+    ...(asked.tier ? { tier: asked.tier } : {}),
   }
-  const changed = merged.model !== held?.model || merged.tools !== held?.tools || merged.thinking !== held?.thinking
+  const changed =
+    merged.model !== held?.model || merged.tools !== held?.tools || merged.thinking !== held?.thinking || merged.tier !== held?.tier
   if (changed) await updateRecord(w, $, agentId, { choice: merged })
 
   // What the person allows Claude itself, as the spawn carried it: plan mode is read-only here too.

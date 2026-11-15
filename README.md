@@ -48,7 +48,10 @@ Ask in plain language: "Have codex review src/api". Optional lines at the top of
 | `model: <model>` | The harness's model |
 | `tools: read` | Read-only, whatever the permission mode |
 | `thinking: <level>` | Reasoning effort; a level the harness or model doesn't have is refused |
+| `tier: fast\|default` | Codex fast mode on or off; changed in an idle follow-up |
 | `via-help` | Lists the harness's options instead of running it |
+
+Codex fast mode uses more of your plan and needs a model that supports it. Omit `tier:` to keep the saved choice; tier lines sent to a running agent are plain text.
 
 A message to a running Codex, OpenCode or pi agent reaches it at its next step; `interrupt:` first stops the current step. agy only takes follow-ups. A completed answer ends with the model the harness reports; one only taken from your `model:` line says `(requested)`, and a harness that won't say gets `model not reported`.
 
