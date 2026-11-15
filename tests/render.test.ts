@@ -12,6 +12,9 @@ const call = (index: number): RenderPropsOf['ToolGroup']['calls'][number] & { to
   isInterrupted: false,
 })
 
+// A drawn element, not an engine reference.
+type Drawn = Exclude<RenderElement, { type: 'engine' }>
+
 const textOf = (node: unknown): string =>
   typeof node === 'string'
     ? node
@@ -30,8 +33,9 @@ test('nested command titles stay on the summary and ctrl+o preserves their exact
   const title = "sed -n '120,180p' src/example/long_module_name_for_wrapping.py; sed…"
   const output = 'first check PASS, selected count 7\nsecond check PASS\nthird check PASS'
   const calls = Array.from({ length: 10 }, (_, index) => call(index + 1))
-  calls[8] = { ...calls[8], input: { kind: 'read', title: 'Read source' } }
-  calls[9] = { ...calls[9], input: { kind: 'execute', title }, output }
+  const last = { ...call(10), input: { kind: 'execute', title }, output }
+  calls[8] = { ...call(9), input: { kind: 'read', title: 'Read source' } }
+  calls[9] = last
   const seen: RenderInput[] = []
   on('ui.render', (_, e) => {
     seen.push(e)
@@ -43,7 +47,7 @@ test('nested command titles stay on the summary and ctrl+o preserves their exact
       component: 'ToolGroup',
       requestId: 'nested-group',
       props: { calls, isActive: true, isExpanded: false, isCallsOnly: true },
-    })) as RenderElement
+    })) as Drawn
     expect(seen).toHaveLength(0)
     expect(textOf(drawn)).toBe(`Running 9 commands, reading 1 file… · ${title}`)
     expect(drawn.children).toHaveLength(1)
@@ -51,10 +55,10 @@ test('nested command titles stay on the summary and ctrl+o preserves their exact
       surface,
       component: 'ToolUse',
       requestId: 'nested-expanded',
-      props: { ...calls[9], isExpanded: true },
-    })) as RenderElement
+      props: { ...last, isExpanded: true },
+    })) as Drawn
     expect(row.type).toBe('Box')
-    expect(row.props?.flexDirection).toBe('column')
+    expect((row.props as Record<string, unknown> | undefined)?.flexDirection).toBe('column')
     expect(row.children?.map(textOf)).toEqual([
       `Ran ${title}`,
       '  ⎿  first check PASS, selected count 7',
