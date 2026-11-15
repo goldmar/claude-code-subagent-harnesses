@@ -16,8 +16,9 @@ type Queued =
 export type Channel = {
   readonly key: string // this assignment's: a child's work after an end is a new nested agent
   readonly type: string // the nested agent's subagent_type
-  readonly title: string
-  readonly description?: string
+  title: string
+  description?: string
+  readonly parent?: string
   model?: string
   readonly queue: Queued[]
   wake?: () => void
@@ -44,19 +45,25 @@ export function route(w: Children, agentId: string, type: string, event: Extract
   const id = event.k === 'child' ? event.id : event.child
   let channel = w.channels.get(key(id))
   const marks: Mark[] = []
+  // A display-only acknowledgement cannot reopen a view whose answer is already finished.
+  const late = event.k === 'of' && event.norm.k === 'user' && event.norm.preserveAnswer
+  if (late && (channel === undefined || channel.ended || channel.read)) return marks
   // A child is shown on its first sign of work or its announcement, never on a patch alone (codex-acp
   // clears its cancel capability after it goes idle). Work after an end is a new assignment of the same
   // child: a new nested agent, as Claude Code shows one; its model snapshot is not work.
-  const working = (event.k === 'of' && event.norm.k !== 'model') || (event.k === 'child' && event.state === 'running')
-  const announced = event.k === 'child' && event.title !== undefined
+  const working = (event.k === 'of' && event.norm.k !== 'model' && !late) || (event.k === 'child' && event.state === 'running')
+  const announced = event.k === 'child' && (event.title !== undefined || event.description !== undefined)
   if (channel === undefined ? working || announced || event.k === 'of' : channel.ended && working) {
     const title = (event.k === 'child' ? event.title : undefined) ?? channel?.title ?? 'subagent'
-    const description = event.k === 'child' ? event.description : channel?.description
+    const description =
+      event.k === 'child' ? (event.description ?? channel?.description) : event.norm.k === 'user' ? event.norm.t : channel?.description
+    const parentId = event.k === 'child' ? event.parent : channel?.parent
     const assignment = `${key(id)}#${channel ? Number(channel.key.slice(channel.key.lastIndexOf('#') + 1)) + 1 : 1}`
     channel = {
       key: assignment,
       type,
       title,
+      ...(parentId ? { parent: parentId } : {}),
       ...(description ? { description } : {}),
       queue: [],
       spawned: true,
@@ -66,17 +73,23 @@ export function route(w: Children, agentId: string, type: string, event: Extract
     }
     w.channels.set(key(id), channel)
     w.channels.set(assignment, channel)
-    const parent = event.k === 'child' ? w.channels.get(key(event.parent)) : undefined
+    const parent = parentId ? w.channels.get(key(parentId)) : undefined
     if (parent !== undefined) put(parent, { k: 'spawn', child: assignment })
     else marks.push({ kind: 'spawn', child: assignment, type, title, ...(description ? { description } : {}) })
+    // The opening user message is already the native Agent prompt for this assignment.
+    if (event.k === 'of' && event.norm.k === 'user') return marks
   }
   if (channel === undefined) return marks
   if (event.k === 'of') {
     if (event.norm.k === 'model') channel.model = event.norm.name
     put(channel, event.norm)
-  } else if (event.state === 'idle' && !channel.ended) {
-    channel.ended = true
-    put(channel, { k: 'end', ...(event.failure ? { failure: event.failure } : {}), ...(event.cancelled ? { cancelled: true } : {}) })
+  } else {
+    if (event.title) channel.title = event.title
+    if (event.description !== undefined) channel.description = event.description
+    if (event.state === 'idle' && !channel.ended) {
+      channel.ended = true
+      put(channel, { k: 'end', ...(event.failure ? { failure: event.failure } : {}), ...(event.cancelled ? { cancelled: true } : {}) })
+    }
   }
   return marks
 }
@@ -206,7 +219,8 @@ export async function* childRun(
           title: grand.title,
           ...(grand.description ? { description: grand.description } : {}),
         }
-    } else if (item.k === 'message') writer.message()
+    } else if (item.k === 'user') yield writer.user(item.t, item.preserveAnswer)
+    else if (item.k === 'message') writer.message()
     else if (item.k === 'text') yield writer.text(item.t)
     else if (item.k === 'thinking') yield writer.thinking(item.t)
     else if (item.k === 'plan') yield* writer.plan(item.entries, null)

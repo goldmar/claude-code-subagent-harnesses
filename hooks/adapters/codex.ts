@@ -1,9 +1,10 @@
 import type { Choice } from '../../types'
-import { relayEvents, sessionLost } from '../acp/events'
+import { sessionLost } from '../acp/events'
 import { isRecord } from '../acp/json'
 import { type AcpMode, type AcpSpec, acpMode, acpStart } from '../acp/spec'
 import type { Adapter, Mode } from '../adapter'
 import { CODEX_EFFORTS } from '../wire'
+import { codexEvents } from './codex-children'
 
 // Read-only is the one mode via defends. Otherwise codex works in its workspace sandbox and asks before
 // going past it, as codex exec did; the question reaches the person, except in bypass (approved) and
@@ -109,7 +110,7 @@ export const codex = {
       ...(readOnly ? { env: guard } : {}),
     })
   },
-  events: () => relayEvents(),
+  events: () => codexEvents(),
   // The relay names the model the session runs on.
   model: () => undefined,
   failure: (_exit, stderr) =>

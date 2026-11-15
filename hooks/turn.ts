@@ -117,6 +117,10 @@ async function* nestedStep(
   record: AgentRecord,
   signal: AbortSignal,
 ): AsyncGenerator<TurnStepChunk, TurnStepResult> {
+  // Append a transcript row without sending a second instruction to the harness.
+  const user = async (text: string) => {
+    await $.session.append({ agentId, message: { type: 'user', content: [{ type: 'text', text }] } })
+  }
   let job = w.jobs.get(agentId)
   if (job === undefined) {
     // After its answer, or a later message: the answer again.
@@ -133,7 +137,7 @@ async function* nestedStep(
     }
     w.jobs.set(agentId, job)
   }
-  const result = yield* pump(w, job, e, signal, joining($, agentId, job.turnId))
+  const result = yield* pump(w, job, e, signal, joining($, agentId, job.turnId), user)
   // Its answer, once it has one, for a later step and a new process. childRun has handed it back by then.
   // Handed back only if that step did: a run that could not be followed ends as text.
   if (job.final?.answer) {
