@@ -8,5 +8,6 @@
 - `hooks/record.ts` keeps one record per agent in `$.store`, so an agent continued in a new process still has its session, mode and last answer.
 - `hooks/writer.ts` writes a run's steps, for `via` agents and their nested ones.
 - Harness tool calls reach Claude Code as calls to the MCP tool `step`, which runs nothing: `via` answers each with what the harness reported, and refuses a `step` call it didn't make.
+- A collapsed group containing only `step` calls keeps one counted summary line, including failed and interrupted calls. Wait continuations count with their original command; ctrl+o keeps the native expanded view. Mixed groups and groups with other rows keep native rendering.
 - Nested agents need the harness to report subagents over ACP ([subagents RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/main/docs/rfds/subagents.mdx)); `codex-acp` does.
 - `pnpm test:relay` tests the relay against a fake agent; `relay/checks/` holds the live checks for each ACP agent.

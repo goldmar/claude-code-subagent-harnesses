@@ -4,6 +4,8 @@ Claude hands a task to Codex, Antigravity, OpenCode or pi, and each runs it thro
 
 ![A via:codex agent in Claude Code, its steps folded into lines such as "Ran 4 commands"](https://github.com/user-attachments/assets/e36113c3-b375-4f0d-99ae-5851e73105e9)
 
+Step calls stay on one collapsed summary line from the first call, with the running title and failure count. Use ctrl+o for each call and its output.
+
 ## Set up
 
 `/plugin install via --marketplace SeanLF/claude-code-subagent-harnesses` in Claude Code, or from a shell:
