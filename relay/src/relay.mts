@@ -220,40 +220,56 @@ const result = await acp
     const sessionId = resume ?? (opened as acp.NewSessionResponse).sessionId
     // cwd: so a title's paths can be shown relative to it.
     out({ relay: 'session', sessionId, cwd })
+    // A cancel stops the turn, not the commands it started: codex keeps them as background terminals, in
+    // their own session, so they outlive the agent and its process group (reproduced: a `sleep` ran on,
+    // reparented to init). Closing the session stops them; an agent that can close and resume one does so.
+    const can = init.agentCapabilities?.sessionCapabilities
+    const closes = can?.close != null
+    const reopens = closes && can?.resume != null
+    const close = () => (closes ? ctx.request(acp.methods.agent.session.close, { sessionId }).then(() => {}) : Promise.resolve())
     cancel = async () => {
       await ctx.notify(acp.methods.agent.session.cancel, { sessionId })
       // A moment for the agent to abort its tool before the kill.
       await new Promise((resolve) => setTimeout(resolve, 500))
+      await close().catch(() => {})
     }
 
-    const modeId = process.env.RELAY_AGENT_MODE
-    if (modeId)
-      await ctx
-        .request(acp.methods.agent.session.setMode, { sessionId, modeId })
-        .catch((error: unknown) => fail(`the agent refused mode ${modeId}: ${String((error as { message?: unknown })?.message ?? error)}`))
-    let configOptions = (opened as { configOptions?: acp.SessionConfigOption[] | null }).configOptions ?? []
-    const model = process.env.RELAY_MODEL
-    if (model) {
-      // A model the agent refuses ends the run: carrying on would answer from its default model.
-      const set = await ctx
-        .request(acp.methods.agent.session.setConfigOption, { sessionId, configId: 'model', value: model })
-        .catch((error: unknown) => fail(`the agent refused model ${model}: ${String((error as { message?: unknown })?.message ?? error)}`))
-      configOptions = set.configOptions ?? configOptions
-    }
     let extra: Record<string, unknown> = {}
     try {
       extra = JSON.parse(process.env.RELAY_CONFIG || '{}') as Record<string, unknown>
     } catch {
       fail('RELAY_CONFIG is not a JSON object')
     }
-    for (const [configId, value] of Object.entries(extra)) {
-      if (typeof value !== 'string') fail(`RELAY_CONFIG.${configId} must be a string`)
-      const set = await ctx
-        .request(acp.methods.agent.session.setConfigOption, { sessionId, configId, value: value as string })
-        .catch((error: unknown) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error)}`))
-      configOptions = set.configOptions ?? configOptions
+    // The session's mode and options, set again on a reopened session, which starts from the agent's defaults.
+    const configure = async (session: { configOptions?: acp.SessionConfigOption[] | null }) => {
+      const modeId = process.env.RELAY_AGENT_MODE
+      if (modeId)
+        await ctx
+          .request(acp.methods.agent.session.setMode, { sessionId, modeId })
+          .catch((error: unknown) =>
+            fail(`the agent refused mode ${modeId}: ${String((error as { message?: unknown })?.message ?? error)}`),
+          )
+      let configOptions = session.configOptions ?? []
+      const model = process.env.RELAY_MODEL
+      if (model) {
+        // A model the agent refuses ends the run: carrying on would answer from its default model.
+        const set = await ctx
+          .request(acp.methods.agent.session.setConfigOption, { sessionId, configId: 'model', value: model })
+          .catch((error: unknown) =>
+            fail(`the agent refused model ${model}: ${String((error as { message?: unknown })?.message ?? error)}`),
+          )
+        configOptions = set.configOptions ?? configOptions
+      }
+      for (const [configId, value] of Object.entries(extra)) {
+        if (typeof value !== 'string') fail(`RELAY_CONFIG.${configId} must be a string`)
+        const set = await ctx
+          .request(acp.methods.agent.session.setConfigOption, { sessionId, configId, value: value as string })
+          .catch((error: unknown) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error)}`))
+        configOptions = set.configOptions ?? configOptions
+      }
+      return configOptions
     }
-    const current = configOptions.find((o) => o.id === 'model')
+    const current = (await configure(opened as { configOptions?: acp.SessionConfigOption[] | null })).find((o) => o.id === 'model')
     if (current && 'currentValue' in current && typeof current.currentValue === 'string')
       out({ relay: 'model', name: current.currentValue })
 
@@ -360,10 +376,20 @@ const result = await acp
       promptDone(r)
       if (interrupt !== undefined) {
         out({ relay: 'interrupted' })
+        // The interrupted step's commands stop with the session, which reopens for the interrupt's message.
+        if (reopens) {
+          await close().catch((error: unknown) => fail(`could not stop the interrupted step: ${reason(error)}`))
+          const reopened = await ctx
+            .request(acp.methods.agent.session.resume, { sessionId, cwd, mcpServers: [] })
+            .catch((error: unknown) => fail(`could not reopen the session after an interrupt: ${reason(error)}`))
+          await configure(reopened as { configOptions?: acp.SessionConfigOption[] | null })
+        }
         queue.unshift(interrupt)
         interrupt = undefined
       }
     }
+    // Ends what the run left running, before the agent is killed.
+    await close().catch((error: unknown) => process.stderr.write(`acp relay: could not close the session: ${reason(error)}\n`))
     return last
   })
 

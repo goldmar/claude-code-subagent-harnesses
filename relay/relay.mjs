@@ -10404,31 +10404,45 @@ var result = await client({ name: "via" }).onRequest(methods.client.session.requ
   }) : await ctx.request(methods.agent.session.new, { cwd, mcpServers: [] });
   const sessionId = resume ?? opened.sessionId;
   out({ relay: "session", sessionId, cwd });
+  const can = init.agentCapabilities?.sessionCapabilities;
+  const closes = can?.close != null;
+  const reopens = closes && can?.resume != null;
+  const close = () => closes ? ctx.request(methods.agent.session.close, { sessionId }).then(() => {
+  }) : Promise.resolve();
   cancel = async () => {
     await ctx.notify(methods.agent.session.cancel, { sessionId });
     await new Promise((resolve) => setTimeout(resolve, 500));
+    await close().catch(() => {
+    });
   };
-  const modeId = process.env.RELAY_AGENT_MODE;
-  if (modeId)
-    await ctx.request(methods.agent.session.setMode, { sessionId, modeId }).catch((error2) => fail(`the agent refused mode ${modeId}: ${String(error2?.message ?? error2)}`));
-  let configOptions = opened.configOptions ?? [];
-  const model = process.env.RELAY_MODEL;
-  if (model) {
-    const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId: "model", value: model }).catch((error2) => fail(`the agent refused model ${model}: ${String(error2?.message ?? error2)}`));
-    configOptions = set.configOptions ?? configOptions;
-  }
   let extra = {};
   try {
     extra = JSON.parse(process.env.RELAY_CONFIG || "{}");
   } catch {
     fail("RELAY_CONFIG is not a JSON object");
   }
-  for (const [configId, value] of Object.entries(extra)) {
-    if (typeof value !== "string") fail(`RELAY_CONFIG.${configId} must be a string`);
-    const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId, value }).catch((error2) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error2)}`));
-    configOptions = set.configOptions ?? configOptions;
-  }
-  const current = configOptions.find((o) => o.id === "model");
+  const configure = async (session) => {
+    const modeId = process.env.RELAY_AGENT_MODE;
+    if (modeId)
+      await ctx.request(methods.agent.session.setMode, { sessionId, modeId }).catch(
+        (error2) => fail(`the agent refused mode ${modeId}: ${String(error2?.message ?? error2)}`)
+      );
+    let configOptions = session.configOptions ?? [];
+    const model = process.env.RELAY_MODEL;
+    if (model) {
+      const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId: "model", value: model }).catch(
+        (error2) => fail(`the agent refused model ${model}: ${String(error2?.message ?? error2)}`)
+      );
+      configOptions = set.configOptions ?? configOptions;
+    }
+    for (const [configId, value] of Object.entries(extra)) {
+      if (typeof value !== "string") fail(`RELAY_CONFIG.${configId} must be a string`);
+      const set = await ctx.request(methods.agent.session.setConfigOption, { sessionId, configId, value }).catch((error2) => fail(`the agent refused ${configId} ${String(value)}: ${reason(error2)}`));
+      configOptions = set.configOptions ?? configOptions;
+    }
+    return configOptions;
+  };
+  const current = (await configure(opened)).find((o) => o.id === "model");
   if (current && "currentValue" in current && typeof current.currentValue === "string")
     out({ relay: "model", name: current.currentValue });
   const queue = [prompt];
@@ -10521,10 +10535,17 @@ ${text2}`;
     promptDone(r);
     if (interrupt !== void 0) {
       out({ relay: "interrupted" });
+      if (reopens) {
+        await close().catch((error2) => fail(`could not stop the interrupted step: ${reason(error2)}`));
+        const reopened = await ctx.request(methods.agent.session.resume, { sessionId, cwd, mcpServers: [] }).catch((error2) => fail(`could not reopen the session after an interrupt: ${reason(error2)}`));
+        await configure(reopened);
+      }
       queue.unshift(interrupt);
       interrupt = void 0;
     }
   }
+  await close().catch((error2) => process.stderr.write(`acp relay: could not close the session: ${reason(error2)}
+`));
   return last;
 });
 out({ relay: "done", stopReason: result?.stopReason ?? null });

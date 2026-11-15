@@ -277,6 +277,19 @@ test('an interrupt the relay already ran is neither rerun nor named as undeliver
   expect(calls).toEqual([{ result: 'interrupted', isError: true }])
 })
 
+test('what the session says while it reopens after an interrupt is not part of the answer', async ($, on) => {
+  const spawns: Spawn[] = []
+  // The relay closes the session to stop the interrupted step's commands, then resumes it: codex can speak
+  // in between, as it does when the resumed thread's recorded model differs from its default.
+  const at = CAPTURED.findIndex((e) => 'relay' in e && e.relay === 'interrupted') + 1
+  const reopened = [...CAPTURED.slice(0, at), chunk('msg_w', 'Warning: resuming with another model.\n'), ...CAPTURED.slice(at)]
+  arrange(on, spawns, { stdout: lines(reopened) })
+  await $.turn.start({ turnId: 't1', agentId: 'a1', text: 'go' })
+  const { chunks, result } = await runTurn($)
+  expect(result.answer).toBe('REDIRECTED\n\n— answered by codex, gpt-6.1-sol')
+  expect(chunks.some((c) => c.kind === 'text' && c.text.includes('Warning'))).toBe(false)
+})
+
 test('a resumed read-only follow-up keeps its session, read-only mode and MCP guard together', async ($, on) => {
   const spawns: Spawn[] = []
   arrange(on, spawns, undefined, { mcp: { exitCode: 0, stdout: JSON.stringify([{ name: 'node_repl' }]) } })

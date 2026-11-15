@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -133,4 +134,32 @@ test('a symlink or .. that leads out of the working folder stays text, and at mo
     return path
   })
   assert.equal(said(`See ${many.join(' ')}`, dir).blocks.length, 1 + 4)
+})
+
+test("an interrupt closes the session, which stops the step's commands, and reopens it for its message", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relay-test-'))
+  const inbox = join(dir, 'inbox')
+  writeFileSync(inbox, '')
+  const run = spawn('node', [relay, '--', 'node', agent], {
+    env: { ...process.env, FAKE_REOPEN: '1', RELAY_INBOX: inbox, RELAY_AGENT_MODE: 'workspace-write' },
+  })
+  let stderr = ''
+  run.stderr.on('data', (data) => {
+    stderr += data
+    // The first prompt is running: interrupt it.
+    if (stderr.includes('fake: prompt') && !readFileSync(inbox, 'utf8')) appendFileSync(inbox, '{"interrupt":"stop"}\n')
+  })
+  let stdout = ''
+  run.stdout.on('data', (data) => (stdout += data))
+  run.stdin.end('go')
+  const [code] = await once(run, 'exit')
+  assert.equal(code, 0)
+  const calls = stderr.match(/^fake: .*$/gm)?.map((line) => line.slice('fake: '.length))
+  // The mode is set again on the reopened session, which starts from the agent's defaults; the run's end closes it too.
+  assert.deepEqual(calls, ['set_mode', 'prompt', 'cancel', 'close', 'resume', 'set_mode', 'prompt', 'close'])
+  const relayed = stdout
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line).relay)
+  assert.deepEqual(relayed, ['session', 'steered', 'prompt_done', 'interrupted', 'steered', 'prompt_done', 'done'])
 })
