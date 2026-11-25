@@ -301,6 +301,8 @@ export async function questionClosed(w: Pick<Steps, 'jobs'>, ref: { agentId: str
   }
 }
 
+export const CALL_HOLD_MS = 15 * 60_000
+
 // The tool.call hook on the plugin's tool: reads the run on until the harness finishes this call, keeping
 // whatever else it says for the next step. Never runs anything itself.
 export async function answerCall(
@@ -308,12 +310,21 @@ export async function answerCall(
   toolUseId: string | undefined,
   signal: AbortSignal,
   wait: (agentId: string, turnId: string) => Promise<void>,
+  now: () => number = Date.now,
 ): Promise<{ result: string; isError?: true } | { deny: string }> {
   const ref = toolUseId === undefined ? undefined : w.calls.get(toolUseId)
   const job = ref === undefined ? undefined : w.jobs.get(ref.agentId)
   if (ref === undefined || job === undefined)
     return { deny: 'This tool only reports a tool call an agent harness made; it does nothing when called.' }
   const unlend = lend(job, signal)
+  const until = now() + CALL_HOLD_MS
+  const input = ref.input ?? { kind: 'other', title: 'harness tool' }
+  const waiting: Mark = {
+    kind: 'call-start',
+    id: ref.id,
+    input: input.kind === 'wait' ? input : { kind: 'wait', title: `Waiting for ${input.title}` },
+    usage: null,
+  }
   try {
     for (;;) {
       const done = job.outputs.get(ref.id)
@@ -325,6 +336,11 @@ export async function answerCall(
       // Bounded, as in pump: a harness command can run past the hook's ten-second budget, so the hook
       // waits through the engine's wait and reads only once a chunk has arrived. A failed read or wait
       // ends the run and answers the call, rather than fail the tool-call hook.
+      if (now() >= until) {
+        job.held.unshift(waiting)
+        w.calls.delete(toolUseId as string)
+        return { result: `The harness tool is still running after ${CALL_HOLD_MS / 60_000} minutes; waiting on in the next step.` }
+      }
       const arrived = await Promise.race([
         read(job).then(
           () => true,
@@ -354,13 +370,7 @@ export async function answerCall(
         // Let the next step show the child now, while the harness's tool is still running. A native
         // Agent call preserves the child's hooks; spawning from this hook would skip it in the child.
         // The continuation only reads this same run and call id: it never executes the tool again.
-        const input = ref.input ?? { kind: 'other', title: 'harness tool' }
-        job.held.unshift(r.value, {
-          kind: 'call-start',
-          id: ref.id,
-          input: input.kind === 'wait' ? input : { kind: 'wait', title: `Waiting for ${input.title}` },
-          usage: null,
-        })
+        job.held.unshift(r.value, waiting)
         w.calls.delete(toolUseId as string)
         return { result: 'The harness tool is still running; showing its subagent now.' }
       } else job.held.push(r.value)

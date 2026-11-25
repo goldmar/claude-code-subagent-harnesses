@@ -260,3 +260,53 @@ test('a tool call waits on a silent harness through the bounded wait, and a fail
   expect(answer).toEqual({ result: 'The harness run could not be followed: its producer or its wait failed.' })
   expect(job.abort.signal.aborted).toBe(true)
 })
+
+test('a tool call still running at the hold ends its step and waits on in the next, before what the run said meanwhile', async () => {
+  let release = () => {}
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const job: steps.Job = {
+    turnId: 't1',
+    count: 0,
+    abort: new AbortController(),
+    outputs: new Map(),
+    held: [],
+    gen: (async function* () {
+      yield { kind: 'text' as const, index: 0, text: 'meanwhile' }
+      await pending
+      yield { kind: 'call-end' as const, id: 'one', output: 'suite passed', failed: false }
+      return { turnId: 't1', index: 0, answer: 'done', toolUses: [], stopReason: 'end_turn' as const, usage: null }
+    })(),
+  }
+  const world: steps.Steps = {
+    tool: 'mcp__plugin_via_step__step',
+    spawns: new Map(),
+    jobs: new Map([['fixture', job]]),
+    calls: new Map([['toolu_one', { agentId: 'fixture', id: 'one', input: { kind: 'execute', title: 'pytest' } }]]),
+    handed: new Map(),
+  }
+  let clock = 0
+  const now = () => clock
+  const wait = () => {
+    clock += 60_000
+    return Promise.resolve()
+  }
+  const first = await steps.answerCall(world, 'toolu_one', new AbortController().signal, wait, now)
+  expect(first).toEqual({ result: 'The harness tool is still running after 15 minutes; waiting on in the next step.' })
+  expect(clock).toBe(steps.CALL_HOLD_MS)
+  expect(job.abort.signal.aborted).toBe(false)
+  expect(world.calls.has('toolu_one')).toBe(false)
+  expect(job.held).toEqual([
+    { kind: 'call-start', id: 'one', input: { kind: 'wait', title: 'Waiting for pytest' }, usage: null },
+    { kind: 'text', index: 0, text: 'meanwhile' },
+  ])
+  const event = { turnId: 't1', index: 1, agentId: 'fixture' }
+  const next = await finish(steps.pump(world, job, event, new AbortController().signal, wait))
+  expect(next.stopReason).toBe('tool_use')
+  expect(next.toolUses).toEqual([{ name: world.tool, input: { kind: 'wait', title: 'Waiting for pytest' } }])
+  const [again] = [...world.calls.keys()]
+  release()
+  expect(await steps.answerCall(world, again, new AbortController().signal, wait, now)).toEqual({ result: 'suite passed' })
+  expect(job.held).toEqual([{ kind: 'text', index: 0, text: 'meanwhile' }])
+})

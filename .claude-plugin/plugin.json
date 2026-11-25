@@ -1,6 +1,6 @@
 {
   "name": "via",
-  "version": "0.11.0-local.1",
+  "version": "0.11.0-local.2",
   "description": "Claude Code leads; Codex, Gemini (Antigravity), OpenCode and pi do the work as native subagents on your own login, saving Claude's tokens and context.",
   "keywords": [
     "codex",
